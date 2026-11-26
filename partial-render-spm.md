@@ -38,9 +38,9 @@ the firmware chooses:
 
 ## Observed sequences (answers Q23, O)
 
-Black-box observation of the open v1.1 image on the board running `vkfwtest bigpb`: one
-1024×1024 render target, millions of triangles per frame, so geometry runs out of PB pages
-again and again. The quoted lines are public trace strings.
+Black-box observation of the open v1.1 image on the board running a multi-million-triangle
+Vulkan render workload: one 1024×1024 render target, millions of triangles per frame, so
+geometry runs out of PB pages again and again. The quoted lines are public trace strings.
 
 **Freelists involved.** The trace names both freelists on every OOM: `U-FL` (the
 **global** freelist) and `N-FL` (the HWRTData's **local** freelist). In this run the local
@@ -163,6 +163,24 @@ After a hardware recovery that corrupted freelists, the firmware sends FWCCB
 
 - The FREELIST_GROW protocol is a **strict request ↔ confirmation pair**. The firmware
   keeps the context blocked until the confirmation arrives.
+- **PM pause handshake during freelist updates (O/D):** before changing the freelist base
+  or stack pointer in hardware, set `CR[0x02A0] = 1` (pause TA allocation), poll
+  `CR[0x02A8]` until bit 0 reads `1`, update the freelist state, then write `CR[0x02A0] = 0`
+  to unpause.
+- **Non-mutating fence evaluation when arming a partial render (D/O):** while in
+  `PR blocked`, check whether the fragment context's `FENCE_PR` + `FRAG_PR` can run
+  **without mutating the live `dep_offset` in shared memory** until all `FENCE_PR` UFOs
+  satisfy the SPM failing-UFO check and any required ZS/MSAA `PRBUFFER` is backed. Only
+  once those conditions hold should the firmware record the PR command offset, transition
+  to `wait for HW`, and schedule DM 3.
+- **Invalidate the active 3D HWRTData slot after each partial render (D/O):** the firmware
+  tracks which `rogue_fwif_hwrtdata` is currently loaded in each PM hardware context
+  (geometry / 3D / secondary geometry). When restarting geometry after a partial render
+  completes (`PR executed` → `none`), **clear/invalidate the 3D PM slot** if it still
+  references that HWRTData. Otherwise, a subsequent partial render on the same HWRTData
+  (common in multi-PR frames with heavy geometry) sees a false cache hit on the 3D PM
+  slot, skips reloading the updated `ALIST1`/`MLIST1` stack pointers, and immediately
+  triggers a `BIF0` page fault.
 - Freelist cleanup requests must return the **correct return-slot bits**:
   `ROGUE_FWIF_KCCB_RTN_SLOT_CMD_EXECUTED` alone when the freelist was cleaned, and
   `CMD_EXECUTED | ROGUE_FWIF_KCCB_RTN_SLOT_CLEANUP_BUSY` when it is still in use. Reporting

@@ -74,7 +74,7 @@ Read **[1] Clean-room process** first. In short:
 18. [Hardware recovery (HWR)](hardware-recovery.md) — fault/lockup detection, register
     polls, reset, command discard/recovery, freelist reconstruction, cleanup.
 19. [Observed sequences (behaviour reference)](observed-sequences.md) — sequences
-    validated on the board (and some in emulation): host notification, job cycle, context
+    validated on hardware on the K1: host notification, job cycle, context
     store/resume, OOM/grow, power, HWR, USC/GPIO events, 3D timeout; reference latencies.
     Acceptance reference for the reimplementation.
 20. [RGX registers used by the firmware](registers.md) — map of relevant control registers
@@ -91,6 +91,9 @@ Read **[1] Clean-room process** first. In short:
     SPM, PM, RTData, PB, USC, TA, CDM, …).
 25. [Input-attachment render dump](input-attachment-dump.md) — observed register values
     during an input-attachment render pass (Q16m).
+26. [Board testing and acceptance oracle](board-testing-oracle.md) — hardware safety,
+    `.fw` pre-flight checks, three-stage acceptance oracle (4-DM + SPM Vulkan workloads,
+    6 safe `dEQP-VK` suites, runtime PM suspend/resume) and reference pass counts on the K1.
 
 ---
 

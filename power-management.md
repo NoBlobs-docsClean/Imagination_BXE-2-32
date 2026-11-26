@@ -54,6 +54,12 @@ in reset).
 If the signal does not arrive, the host suspend times out, runtime PM fails and the device
 is marked lost. This is the most serious possible power-management failure.
 
+> **Linux mainline runtime-PM note (O):** on the K1 board (`cac00000.gpu`),
+> `power/control = auto` with `autosuspend_delay_ms = 50`. Make sure every MMIO write
+> during idle reporting and teardown is `volatile` and flushed through the write barrier
+> before raising `ROGUE_CR_MIPS_WRAPPER_IRQ_STATUS = 1` or writing `power_sync = 1`. See
+> [board-testing-oracle](board-testing-oracle.md) for the suspend/resume test procedure.
+
 ## APM: power off when idle
 
 - The APM latency is `rogue_fwif_sysinit.active_pm_latency_ms` (also in
@@ -94,10 +100,9 @@ page fault.
 - The firmware can notify the host of changes through FWCCB
   `ROGUE_FWIF_FWCCB_CMD_CORE_CLK_RATE_CHANGE`.
 
-## Observed "pow flags" values
+## Trace "pow flags" field
 
-The POW trace entries print a *pow flags* word. Values seen (**O**; meaning **D**, the bit
-names are not public): `0x10000` (power-off request pending), `0x40000` (forced idle),
-`0x80000` (forced request), `0xA0000 = 0x80000 | 0x20000`. The encoding is internal: a
-reimplementation may use any encoding, since only the trace prints it. Full sequences in
-[observed-sequences](observed-sequences.md).
+The POW trace entries print a 32-bit *pow flags* word alongside power-request events. This
+encoding is purely internal to a firmware implementation (only the trace prints it; the
+host does not parse it), so a clean-room implementation may use any encoding it chooses.
+Full power sequences are in [observed-sequences](observed-sequences.md).

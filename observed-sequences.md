@@ -9,8 +9,8 @@ text is the matching **public** trace format string (`pvr_rogue_fwif_sf.h`, iden
 group and id, see [trace-ids](trace-ids.md)).
 
 **Provenance.** Unmarked sections: **O**, observed in the firmware trace on the board.
-Sections marked **[D]** come from firmware analysis and isolated execution in emulation,
-and were not observed on the board. Timeout values and iteration limits in the [D] sections
+Sections marked **[D]** are derived behavioural requirements (see
+[open-vs-closed](open-vs-closed.md)) that were not observed on the board. Timeout values and iteration limits in the [D] sections
 are implementation parameters, not requirements.
 
 > Addresses `CR[0x....]` here are observed **hardware registers**. Those with a public name
@@ -118,20 +118,19 @@ host -> FW  KCCB ROGUE_FWIF_KCCB_CMD_FREELIST_GROW_UPDATE
 
 **Forced idle + power off + warm boot (mainline runtime PM):**
 ```
-"OS requested forced IDLE, pow flags: 0x0"                               // POW id 19
-"Check Pow state DM… int: 0x6, ext: 0x3, pow flags: 0x40000"             // POW id 1
-"OS requested pow off (forced = 1), pow flags: 0x80000"                  // POW id 59
-"Check Pow state DM… int: 0x6, ext: 0x2, pow flags: 0xa0000"
-"GPU ready to be powered down. Pow state int: 0x6, ext: 0x2, flags: 0xa0000"   // POW id 6
+"OS requested forced IDLE, pow flags: <flags>"                           // POW id 19
+"Check Pow state DM… int: 0x6, ext: 0x3, pow flags: <flags>"             // POW id 1
+"OS requested pow off (forced = 1), pow flags: <flags>"                  // POW id 59
+"Check Pow state DM… int: 0x6, ext: 0x2, pow flags: <flags>"
+"GPU ready to be powered down. Pow state int: 0x6, ext: 0x2, flags: <flags>"   // POW id 6
 (power domain turned off by the host)
 ... next job: domain powered on, firmware re-initialised ...
 "Active PM latency set to 0ms. Core clock: 307200000 Hz"                 // POW id 23, warm boot
 ```
 
-**Observed pow flags** (internal encoding, see [power-management](power-management.md)):
-`0x10000` power-off request pending, `0x40000` forced idle, `0x80000` forced request,
-`0xA0000 = 0x80000 | 0x20000`. A "cancel power off" happens if there was recent work:
-`"Cancel power off request int: …, ext: …, pow flags: …"` (POW id 18).
+The `pow flags` word printed in POW trace entries is an internal implementation-defined
+value (see [power-management](power-management.md)). A "cancel power off" happens if there
+was recent work: `"Cancel power off request int: …, ext: …, pow flags: …"` (POW id 18).
 
 ## HWR (recovery)
 

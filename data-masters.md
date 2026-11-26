@@ -37,8 +37,9 @@ Behaviour requirements:
   (`ROGUE_CR_BIF_CTRL_INVAL`, see [registers](registers.md));
 - a slot in use by a running DM **must not** be reused by another context;
 - the **policy** for choosing the slot to reuse is free (LRU, round-robin, refcount…);
-- the slot occupancy state is also walked in the **power teardown** and in HWR. The chosen
-  structure must allow walking it in finite time (see
+- the slot occupancy state is also walked during **power teardown** (`POW_OFF`, before
+  signalling `power_sync = 1`) and in HWR, so the chosen bookkeeping structure must be
+  walkable in finite time without corrupting active slots (see
   [power-management](power-management.md)).
 
 ## Geometry kick (TA / DM 2 and 6)

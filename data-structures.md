@@ -149,10 +149,39 @@ Structures the host builds in the Client CCB, read by the firmware on dispatch:
 
 ## Freelist and render target
 
-- `rogue_fwif_freelist` (0x40 B): Parameter Buffer (PB) pages for geometry
+- **`rogue_fwif_freelist` (0x40 B, P):** Parameter Buffer (PB) pages for geometry
   (`freelist_dev_addr`, `current_dev_addr`, `current_stack_top`, `max_pages`,
   `grow_pages`, `current_pages`, `allocated_page_count`, `allocated_mmu_page_count`,
   `freelist_id`, `grow_pending`, `ready_pages`, …).
-- `rogue_fwif_hwrtdata` (0x180 B): hardware render-target data. `+0xAC` `state`
-  (`ROGUE_FWIF_RTDATA_STATE_*`), `+0xB0` `freelists_fw_addr[]`. A geometry/fragment pair
-  shares one HWRTData.
+
+- **`rogue_fwif_hwrtdata_common` (0x58 B, P):** render-target configuration shared across
+  HWRTData instances:
+
+  | Offset | Field | Role |
+  |---|---|---|
+  | `+0x00` | `geom_caches_need_zeroing` | initial geometry-cache zeroing flag |
+  | `+0x04` | `screen_pixel_max` | framebuffer pixel bounds |
+  | `+0x08` | `multi_sample_ctl` | MSAA state |
+  | `+0x10` | `flipped_multi_sample_ctl` | Y-flipped MSAA state |
+  | `+0x18` / `+0x20` | `tpc_stride` / `te_screen` | Tail Pointer Cache stride / TE screen |
+  | `+0x24` / `+0x2C` / `+0x30` | `mtile_stride` / `te_mtile1` / `te_mtile2` | macrotile geometry |
+  | `+0x4C` / `+0x50` | `rgn_header_size` / `isp_mtile_size` | region-header size / ISP macrotile size |
+
+- **`rogue_fwif_hwrtdata` (0x180 B, P/D):** live per-render hardware render-target data
+  shared by a geometry/fragment pair:
+
+  | Offset | Field | Role |
+  |---|---|---|
+  | `+0x00` | `pm_mlist_dev_addr` | PM MList base |
+  | `+0x08` / `+0x28` | `vce_cat_base[4]` / `vce_last_cat_base[4]` | VCE catalogue bases (saved on unload) |
+  | `+0x48` / `+0x68` | `te_cat_base[4]` / `te_last_cat_base[4]` | TE catalogue bases |
+  | `+0x88` / `+0x90` | `alist_cat_base` / `alist_last_cat_base` | ALIST catalogue bases |
+  | `+0x98` / `+0xA0` | `pm_alist_stack_pointer` / `pm_mlist_stack_pointer` | PM ALIST/MLIST stack pointers |
+  | `+0xA4` / `+0xA8` | `hwrt_data_common_fw_addr` / `flags` | common RTData pointer / flags |
+  | `+0xAC` | `state` | `rogue_fwif_rtdata_state` (`ROGUE_FWIF_RTDATA_STATE_*`) |
+  | `+0xB0` / `+0xBC` | `freelists_fw_addr[3]` / `freelist_hwr_snapshot[3]` | local/global/shared freelists |
+  | `+0xC8` / `+0xD0` | `vheap_table_dev_addr` / `rta_ctl` | VHeap table / RTA control |
+  | `+0xF0`..`+0x108` | `tail_ptrs`, `macrotile_array`, `rgn_header`, `rtc` | render-target DevVAddrs |
+  | `+0x110` | `owner_geom_not_used_by_host` | active geometry owner (firmware-only) |
+  | `+0x114` | `geom_caches_need_zeroing` | pending geometry-cache zeroing flag |
+  | `+0x140` | `cleanup_state` | post-use cleanup state |

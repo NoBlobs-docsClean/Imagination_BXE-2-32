@@ -8,8 +8,21 @@
 - **MIPS32r2**, **microMIPS** mode (the RGX wrapper sets the boot ISA to microMIPS through
   `ROGUE_CR_MIPS_WRAPPER_CONFIG`, offset `0x0810`, field `BOOT_ISA_MODE`).
 - **o32 ABI**, **soft-float** (no FPU; all floating-point maths is done in software).
-- **Little-endian**, ELF32 `EM_MIPS`.
-- Any microMIPS o32 soft-float toolchain works (e.g. bare-metal GCC or Clang).
+- **Little-endian**, ELF32 `EM_MIPS` (ELF flags `0x72001001`: `noreorder, o32, micromips, mips32r2`).
+- Any bare-metal microMIPS o32 soft-float toolchain (e.g. `mipsel-elf` GCC or Clang with
+  soft-float microMIPS runtime helpers) works with standard freestanding ABI flags:
+  ```text
+  -O2 -std=gnu99 -march=mips32r2 -mmicromips -msoft-float -mno-abicalls -fno-pic -G0 \
+  -ffreestanding
+  ```
+- **Architecture and hardware notes (P/O):**
+  - Every MMIO register access (`0xCF800000` / `0xCFA00000`) **must be `volatile`** so the
+    compiler never merges, reorders, or drops register writes and read-backs.
+  - Indirect function pointers (e.g. timer callbacks invoked via `jalr`) **must have bit 0
+    set (`addr | 1`)** per the microMIPS ISA to remain in microMIPS mode.
+  - D-cache hit-invalidate `CACHE` instructions must iterate over the virtual address range
+    covering newly written host data (such as Client CCB ranges) in 16-byte cache-line
+    steps.
 
 The image is delivered as an ELF with code/data sections, packed into a `.fw` container
 (see [memory-model](memory-model.md) for the header and layout table the host reads).
