@@ -78,8 +78,8 @@ Black-box observation of the open v1.1 image on the board.
 - **Enabling CSW:** the mainline driver leaves the OS config flags at 0, so the host was
   started with the flags `GEOM_EN | FRAG_EN | CDM_EN` set in
   `rogue_fwif_osdata.fw_os_config_flags`.
-- **Workload:** two Vulkan contexts of different priority submitting competing fragment,
-  geometry, and compute jobs.
+- **Workload:** two contexts of different priority (`vkfwtest pre-3d`, `pre-ta`,
+  `pre-cdm`).
 - **Data captured:** the public trace, plus reads of the contexts' `fw_com_ctx_flags`.
 
 **When the firmware decides to store.** When a context of higher priority becomes ready on a
@@ -88,7 +88,7 @@ scheduled for DM <n>. Prios (OSid, OSid Prio, Context Prio): Current: 0, 0, 0 Ne
 Hard Context Switching: 0`. In all three runs the decision came from **priority**. No store
 was triggered by a deadline or by the host.
 
-**Fragment (DM 3): stored and resumed (10 times in the 3D preemption run).**
+**Fragment (DM 3): stored and resumed (10 times in `pre-3d`).**
 ```
 "Higher priority context scheduled for DM 3 …"
 "*** 3D context store start"
@@ -108,7 +108,7 @@ was triggered by a deadline or by the host.
 - **Context-state buffer:** the context's `context_state_addr` stayed the same across all
   the stores.
 
-**Geometry (DM 2): the store completes only when the TA finishes (geometry preemption run).**
+**Geometry (DM 2): the store completes only when the TA finishes (`pre-ta`).**
 ```
 "Higher priority context scheduled for DM 2 …"
 "*** TA context store start"
@@ -120,7 +120,7 @@ was triggered by a deadline or by the host.
 No geometry resume (`CSW resume:1` on a TA kick) was observed. The geometry is not
 interrupted mid-way: the store request is satisfied at the end of the TA.
 
-**Compute (DM 4): the store faults on this stack (compute preemption run).**
+**Compute (DM 4): the store faults on this stack (`pre-cdm`).**
 ```
 "Higher priority context scheduled for DM 4 …"
 "*** CDM FWCtx store start"
@@ -139,7 +139,7 @@ interrupted mid-way: the store request is satisfied at the end of the TA.
   mainline interoperability, **CDM context switching is effectively unusable**; the
   mainline default (flags 0) avoids it.
 
-**Register side of the 3D store and resume (answers Q16m item 4, O).** A 3D preemption
+**Register side of the 3D store and resume (answers Q16m item 4, O).** A `vkfwtest pre-3d`
 run was made with fragment context switching on (`ctx_switch=0x4`). There were 40
 store/resume trace events and no recovery. The registers were sampled every ~10 µs:
 

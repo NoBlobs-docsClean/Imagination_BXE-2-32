@@ -142,7 +142,7 @@ A partial render has no ZS load/store.
 Black-box runs of the open v1.1 image. The workloads were:
 - `dEQP-VK.renderpasses.renderpass1.suballocation.formats.{d16_unorm,d32_sfloat,d24_unorm_s8_uint}.{load,clear}.draw`;
 - `dEQP-VK.draw.renderpass.simple_draw.*` and `basic_draw.*`;
-- multi-million-triangle PB-OOM render and 3D transfer / MSAA resolve workloads.
+- `vkfwtest bigpb` and `xfer`.
 
 All passed, and there was no recovery. Registers were read from the host, with no writes:
 - full-range snapshots at each `Kick 3D`;

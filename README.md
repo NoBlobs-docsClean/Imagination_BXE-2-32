@@ -92,8 +92,8 @@ Read **[1] Clean-room process** first. In short:
 25. [Input-attachment render dump](input-attachment-dump.md) — observed register values
     during an input-attachment render pass (Q16m).
 26. [Board testing and acceptance oracle](board-testing-oracle.md) — hardware safety,
-    `.fw` pre-flight checks, three-stage acceptance oracle (4-DM + SPM Vulkan workloads,
-    6 safe `dEQP-VK` suites, runtime PM suspend/resume) and reference pass counts on the K1.
+    `.fw` pre-flight checks, acceptance oracle (`vkfwtest`, `dEQP-VK` suites, runtime PM
+    suspend/resume, HWR recovery) and reference pass counts on the K1.
 
 ---
 

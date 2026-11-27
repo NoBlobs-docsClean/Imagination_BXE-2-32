@@ -38,9 +38,9 @@ the firmware chooses:
 
 ## Observed sequences (answers Q23, O)
 
-Black-box observation of the open v1.1 image on the board running a multi-million-triangle
-Vulkan render workload: one 1024×1024 render target, millions of triangles per frame, so
-geometry runs out of PB pages again and again. The quoted lines are public trace strings.
+Black-box observation of the open v1.1 image on the board running `vkfwtest bigpb`: one
+1024×1024 render target, millions of triangles per frame, so geometry runs out of PB pages
+again and again. The quoted lines are public trace strings.
 
 **Freelists involved.** The trace names both freelists on every OOM: `U-FL` (the
 **global** freelist) and `N-FL` (the HWRTData's **local** freelist). In this run the local
@@ -217,7 +217,7 @@ After a hardware recovery that corrupted freelists, the firmware sends FWCCB
   (geometry / 3D / secondary geometry). When restarting geometry after a partial render
   completes (`PR executed` → `none`), **clear/invalidate the 3D PM slot** if it still
   references that HWRTData. Otherwise, a subsequent partial render on the same HWRTData
-  (common in multi-PR frames with heavy geometry) sees a false cache hit on the 3D PM
+  (common in multi-PR frames such as `vkfwtest bigpb`) sees a false cache hit on the 3D PM
   slot, skips reloading the updated `ALIST1`/`MLIST1` stack pointers, and immediately
   triggers a `BIF0` page fault.
 - Freelist cleanup requests must return the **correct return-slot bits**:

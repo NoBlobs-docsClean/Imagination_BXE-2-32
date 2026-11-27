@@ -882,7 +882,7 @@ hold.
     `HWRTData0State=7fffffff, HWRTData1State=4` because PM ctx 0 was cleared when the 3D kick
     loaded that HWRTData into PM ctx 1).
 
-- **Reference multi-render sequence from Render 1 `3D finished` to Render 2 `Kick TA` (answers Q29b item 3, O/D):**
+- **Reference `pre-3d` sequence from Render 1 `3D finished` to Render 2 `Kick TA` (answers Q29b item 3, O/D):**
   Observed trace on the open v1.1 reference firmware (`RTD 0xc0143000` → `RTD 0xc0144000`):
   ```text
   [115296] : 3D finished, HWRTData0State=7fffffff, HWRTData1State=4
@@ -1076,8 +1076,8 @@ At every `TA finished` (`EVENT_CLEAR = 0x20`, primary core bank):
    ("Completion: per-job cache flush", DM 2 column) **before** retiring the command.
 
 Omitting the TPC flush (`CR[0x0C50] = 0x40000000` + poll) leaves tail pointers unflushed
-in hardware and stalls or faults subsequent renders (including multi-render sequences on
-the same device and input-attachment second subpasses).
+in hardware and stalls or faults subsequent renders (including the second render of
+`vkfwtest pre-3d` and input-attachment second subpasses).
 
 **Freelist write-back (part of Q19, O).** The freelist state reached by the geometry is
 captured when the freelists are **stored from PM context 0 at the fragment kick** of the same
