@@ -588,6 +588,27 @@ fragment command renders one or more array layers in sequence using `rta_ctl`
      (`frag_regs + 440`) and `rgnhdr_scratch_offset` (`frag_regs + 444`) are **not** read
      or written by the firmware on this GPU.
 
+- **`CR[0x0D20]` at `LASTKICK` `TA finished` and mapping `rtc_dev_addr + 0x200` (answers Q35, D):**
+  1. **`CR[0x0D20]` behaviour:** `CR[0x0CB8] = 1` re-arms the RTC at each kick, and
+     `CR[0x0D20]` counts layers newly marked active in the current kick. At `TA finished` of
+     a `LASTKICK` (without CSW) when `CR[0x0CB0/0x0CB4] != 0`, the firmware does **not**
+     overwrite `active_render_targets` from `CR[0x0D20]` (it only logs a diagnostic if
+     `CR[0x0D20] != 0`, then flushes TPC `0x0C50` and RTC `0x0CB8 = 2`). The layer count
+     is kept from the preceding non-`LASTKICK` `TA finished`, and the `LASTKICK` kick itself
+     scans the RTC bitmap at `rtc_dev_addr + 0x200` for those `active_render_targets` set
+     bits before launching the TA.
+  2. **Mapping client GPU memory (`rtc_dev_addr + 0x200`):**
+     - **MMU context:** the render context's own GPU memory context
+       (`rogue_fwif_fwcommoncontext.fw_mem_context`, using its bound `ROGUE_CR_BIF_CAT_BASE`
+       page-catalogue physical address).
+     - **Translation & window:** walk the 3-level GPU MMU (PC → PD → PT, supporting 4 KiB
+       and 64 KiB GPU pages) to translate the 40-bit GPU VA into a 36-bit bus physical
+       address, and map those pages temporarily through any unused scratch entries of the
+       firmware's MIPS page table (`0xCF000000`, uncached `EntryLo` with `V|G`, `D` cleared
+       for reads, using firmware-chosen unused scratch VAs in the `0xC0xxxxxx` window). On
+       unmap, flush/invalidate the MIPS D-cache, issue a write barrier, clear the temporary
+       page-table entries, and invalidate the dynamic MIPS TLB entries.
+
 #### 2. Per-layer 3D kick programming and `RENDER_TGT_ID` (answers Q27, Q33)
 
 1. **Per-layer region headers (`BCAST[0x0F20/0x0F24]`):**
@@ -642,6 +663,14 @@ fragment command renders one or more array layers in sequence using `rta_ctl`
    `isp_zls_pixels` (`+84`), `isp_xtp_pipe_enable` (`+48`), `tpu` (`+56`), `pixel_phantom`
    (`+64`), `fb_cdc_zls` (`+144`), `isp_dummy_stencil_store_base` (`+424`), and
    `isp_dummy_depth_store_base` (`+432`) are **not** read by the firmware on this GPU.
+3. **PBE MSAA resolve (`downscale`, bit 56 — answers Q34, D/O):**
+   the firmware passes all 8 MRT PBE words (`0x1510..0x158C`) through unchanged (except the
+   `TWIDDLE_3D` `zslice` add above). It does **not** inspect `REG_WORD0.downscale` (bit 56),
+   does **not** modify `0x0F30` (`ISP_AA`) or `0x0FA0`, and performs **no** extra step at
+   `PIXELBE_END_RENDER`. Observed (**O**): with the RTA-enabled Mesa build (`gs_rta_support`
+   on) and the **manufacturer open firmware v1.1 (`build 6976702 OS`)**, `vkfwtest msaa`
+   fails identically (`4096 of 4096 resolved pixels` = `00000000`). The failure is on the
+   Mesa `pvr` side, not in the firmware.
 
 **Answers to the three Q14 questions:**
 
