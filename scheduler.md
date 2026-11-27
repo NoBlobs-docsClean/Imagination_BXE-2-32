@@ -176,6 +176,50 @@ Before starting a context on a DM, the firmware checks whether it may run **now*
   "serialise" flags, to respect pipeline and partial-render dependencies;
 - for compute, priorities are compared with the running compute context.
 
+### Multi-context DM 2 / DM 3 concurrency and PM freelist sync (answers Q38, D/O)
+
+1. **Observed (`O`) — `vkfwtest stress` (4 concurrent devices) on manufacturer firmware:**
+   with the updated Mesa (`pvr-bxe-2-32`, with `VK_SUBPASS_EXTERNAL` barriers) +
+   kernel `powervr 1.1.0` + **manufacturer open firmware v1.1 (`build 6976702 OS`)**,
+   `vkfwtest -k stress` passes **10/10** consecutive runs (`1572–1809 ms`, and **14/14**
+   total including the full battery and repeatability runs) with **zero** `dmesg` lockups,
+   overruns, or page faults. Earlier manufacturer-FW `stress` failures occurred with pre-fix
+   Mesa builds lacking `VK_SUBPASS_EXTERNAL` barriers.
+2. **Preemption (`D`):** when concurrent contexts have equal priority (as in `vkfwtest
+   stress`), preemption / context-switch requests are **not** issued; preemption is only
+   requested when a strictly higher-priority context arrives (`new_prio > running_prio`).
+3. **Concurrent DM 2 + DM 3 PM freelist synchronisation (`D`):** DM 2 (TA) and DM 3 (3D)
+   **do** overlap across different contexts, so when loading `HWRTData` into PM context `C`
+   (`0` = TA, `1` = 3D) while the opposite PM context `O` (`1` or `0`) is running on another
+   DM, the PM load must synchronise shared vs. separate freelists:
+   - **Same-`HWRTData` handoff:** if DM 3 (`C = 1`) loads an `HWRTData` still tracked in PM
+     context 0, save PM context 0's catalogues and clear its tracked slot (when not in SPM).
+   - **Cross-context freelist conflict & PM pause (`CR[0x02A0]` / `CR[0x02A8]`):** for each
+     freelist slot `i ∈ {0 (local), 1 (global)}`, compare `new_fl = hwrtdata.freelists[i]`,
+     `cur_fl = pm_fl[C][i]`, and `other_fl = pm_fl[O][i]`. If `cur_fl != new_fl`:
+     - if `cur_fl != NULL && cur_fl == other_fl`: pause `O` before touching PM registers, and
+       do **not** store `cur_fl` from `C` (since `O` actively owns it);
+     - else if `cur_fl != NULL`: store `cur_fl` from `C`;
+     - if `other_fl == new_fl`: pause `O` and store `other_fl` from `O` before loading
+       `new_fl` into `C` so `C` receives `O`'s up-to-date stack pointer.
+     - **Pause TA alloc** (`O = 0`, when DM 2 is running): `CR[0x02A0] |= 1`, poll
+       `CR[0x02A8] & 1 == 1` (unpause: `CR[0x02A0] &= ~1`, poll `== 0`).
+     - **Pause 3D dealloc** (`O = 1`, when DM 3 is running a 3D render, not TQ_3D):
+       `CR[0x02A0] |= 2`, poll `CR[0x02A8] & 2 == 2` (unpause: `CR[0x02A0] &= ~2`, poll
+       `== 0`).
+   - **Shared vs. separate PB mode (`CR[0x02B0]`):** after storing/loading the freelists and
+     **before** unpausing `CR[0x02A0]`, write:
+     ```text
+     CR[0x02B0] = ((other_fl[0] != new_fl[0]) << 1) | (other_fl[1] != new_fl[1])
+     ```
+     (`bit 1` = different local freelist between TA and 3D; `bit 0` = different global
+     freelist; `0` = shared).
+   - **Unpause & PM-MMU invalidate:** unpause `CR[0x02A0]`, then invalidate the PM-MMU page
+     catalogue for `1 << C` whenever `HWRTData` changed or on a first kick.
+   - Omitting the PM pause, cross-context freelist store, or `CR[0x02B0]` update while two
+     different contexts run concurrently on DM 2 and DM 3 corrupts PM freelist/page-table state
+     across contexts (triggering `BIF0` page faults and DM 3 lockups).
+
 ## Partial render / SPM
 
 Interactions with the partial-render subsystem (geometry out of PM memory) are in

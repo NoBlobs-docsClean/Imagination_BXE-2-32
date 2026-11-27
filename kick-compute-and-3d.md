@@ -658,6 +658,29 @@ fragment command renders one or more array layers in sequence using `rta_ctl`
    - **Layer 0 in the RTC bitmap (`D`):** the firmware never writes to the RTC bitmap
      (`rtc_dev_addr + 0x200`) during geometry; bit 0 being set alongside bits 1 and 5 comes
      from the hardware / host VDM stream (default initial RT 0).
+8. **Background-object `RENDER_TGT_ID` and layered partial renders (answers Q39, D/O):**
+   - **No separate background-task layer register (`D`):** **`BCAST[0x03D8]`** is the
+     **only** hardware register that receives `current_render_target` before `BCAST[0x0F00] =
+     1`. There is no other register or bitfield programmed per layer to pass `RENDER_TGT_ID`
+     to the PDS/USC background task (normal or partial-render background). All other
+     per-layer adjustments are firmware-computed address/slice offsets (`BCAST[0x0F20/0x0F24]`
+     region headers, `BCAST[0x1550 + 8*n]` `TWIDDLE_3D` `zslice`, and ZLS/SLS bases).
+   - **Layered `FRAG_PR` handling (`D`):** the firmware does **not** restrict `FRAG_PR` to
+     layer 0 and does **not** refuse layered partial renders. At `PIXELBE_END_RENDER`,
+     `FRAG_PR` executes the **exact same RTA layer loop** as a normal 3D render: while
+     `render_target_index < active_render_targets - 1`, it advances `render_target_index` and
+     `current_render_target = valid_render_targets[render_target_index]` and re-kicks DM 3 in
+     PR mode; only after the **last** layer finishes does it reset `render_target_index = 0`,
+     flush DM 3, signal `PR executed`, and set `hwrtdata.flags |= 8`. Each `FRAG_PR` kick
+     increments `rta_num_partial_renders[current_render_target]++` (when
+     `rta_num_partial_renders_fw_addr != 0`), and subsequent PR/final kicks evaluate
+     `has_pr` **per layer** (`(hwrtdata.flags & 8) && (rta_num_partial_renders[layer] > 0)`)
+     to choose between `pds_pr_bgnd` + forced Z/S load and normal `pds_bgnd`.
+   - **Observed (`O`):** with the updated Mesa (`pvr-bxe-2-32`, with
+     `VK_SUBPASS_EXTERNAL` barriers and the layered-`LOAD` clear fix) + kernel `powervr
+     1.1.0` (`DRM_PVR_DEV_QUERY_FW_INFO_GET`) + **manufacturer open firmware v1.1 (`build
+     6976702 OS`)**, `vkfwtest bigpb-layers` passes **4/4** (`7525–7544 ms`, zero `dmesg`
+     faults).
 
 ### Occlusion queries and remaining `rogue_fwif_frag_regs` (answers Q32, P/D)
 
