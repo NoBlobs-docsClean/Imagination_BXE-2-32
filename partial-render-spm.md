@@ -159,13 +159,81 @@ bank per PM context: `0x20B8` geometry, `0x2078` fragment) are given in
    CR[0x0CF8] = 1          // resume TE/TA paused by 0x0CF0
    ```
 5. **Restarting geometry after a partial render (`SPM State = PR executed` →
-   `Restart TA after partial render`):**
-   - save the 3D PM context's catalogue bases and invalidate the active 3D HWRTData slot
-     (see fidelity note below);
-   - set `hwrtdata.state = 1`, update `CR[0x03D0]`/`CR[0x03D4]` for the geometry PM context;
-   - write `CR[0x0290] = 1`, then `CR[0x0198] = 1`, then invalidate the PM MMU cache;
-   - write `CR[0x01B8] = 1` and poll `CR[0x01B8] & 1 == 0`;
-   - write `CR[0x0328] = 1` and `CR[0x0CA8] = 1` to restart the TA.
+   `Restart TA after partial render`, answers Q30 items 1–3, D/O):**
+   - **At `3D finished` of the `FRAG_PR`:**
+     1. wait for `PM_3D_MEM_FREE` (`EVENT_STATUS` bit 8) and clear it, run
+        `hwrtdata` 3D-done (`hwrtdata.state = 8` + full 3-step PM-MMU invalidation), clear
+        `PIXELBE_END_RENDER` (and `ZLS_FINISHED` if set), and run the DM 3 cache flush;
+     2. write **`CR[0x0338] = 0`** (`ROGUE_CR_PM_PARTIAL_RENDER_ENABLE`), set SPM state to
+        `PR executed`, and set **`hwrtdata.flags |= 0x8`** (`+0xA8`, marks that at least one
+        partial render has executed on this HWRTData).
+   - **In the TA-restart handler (primary core bank, exact order):**
+     1. **Save 3D PM context catalogue bases and stack pointers** (when `active_hwrtdata[1]
+        == this_hwrtdata` and `hwrtdata.state == 8`): read PM context 1's live registers
+        and write them back into `rogue_fwif_hwrtdata`:
+        - `hwrtdata+0x08` (`vce_cat_base[0]`) ← 64-bit `CR[0x1268/0x126C]` (`PM_CAT_BASE_VCE1`)
+        - `hwrtdata+0x48` (`te_cat_base[0]`) ← 64-bit `CR[0x1270/0x1274]` (`PM_CAT_BASE_TE1`)
+        - `hwrtdata+0x88` (`alist_cat_base`) ← 64-bit `CR[0x1280/0x1284]` (`PM_CAT_BASE_ALIST1`)
+        - `hwrtdata+0x98/0x9C` (`pm_alist_stack_pointer`) ← 64-bit `CR[0x0280/0x0284]`
+        - `hwrtdata+0xA0` (`pm_mlist_stack_pointer`) ← 32-bit `CR[0x02D0]`
+        Then clear `active_hwrtdata[1] = 0`.
+     2. Set `hwrtdata.state = 1`.
+     3. Select PM context 0 in `0x03D0`/`0x03D4`:
+        `CR[0x03D0] &= ~0x00010000`, `CR[0x03D4] &= ~0x00000100`.
+     4. Write **`CR[0x0290] = 1`**, then **`CR[0x0198] = 1`** (no poll between them).
+     5. Run the **full 3-step PM-MMU invalidation** (not `0x1348` alone):
+        - `BCAST[ROGUE_CR_SLC_CTRL_FLUSH_INVAL] = 0x10`, poll `ROGUE_CR_SLC_STATUS0`
+          (`0x3820`) bit 2 == `0`;
+        - `BCAST[ROGUE_CR_BIF_CTRL_INVAL] = 4`, poll `CR[0x12A0]` bit 2 == `0`;
+        - if GPU power domain is on: `BCAST[0x1348] = 1`, poll `CR[0x1348]` bit 0 == `0`.
+     6. Write **`CR[0x01B8] = 1`** and poll **`CR[0x01B8] & 1 == 0`**. If this poll times
+        out, the firmware records `ROGUE_HWRTYPE_POLLFAILURE` (`cr_poll_addr = 0x01B8`),
+        triggers **HWR**, and returns immediately without writing `0x0328`/`0x0CA8`.
+     7. Write **`CR[0x0328] = 1`**, then **`CR[0x0CA8] = 1`** to restart the TA.
+     8. Clear SPM state (`none`) and re-arm the DM 2 watchdog.
+
+### Multi-PR kick state and ZLS / background-object rules (answers Q30 items 2 & 4, D/O)
+
+1. **Mandatory PM partial-render register on `FRAG_PR` (`CR[0x01C0]`):**
+   every fragment kick must write **`CR[0x01C0] = 1`** when running a partial render
+   (`FRAG_PR`) and **`CR[0x01C0] = 0`** on a normal 3D render (primary core bank, alongside
+   `CR[0x0338] = 1` on `FRAG_PR`, and `CR[0x0298] = 0`, `CR[0x01C8] = 0` when not resuming
+   a 3D context store). Omitting `CR[0x01C0] = 1` during `FRAG_PR` leaves PM state
+   inconsistent across multiple partial renders on the same HWRTData and causes `0x01B8`
+   (or the SLC/PM-MMU invalidation) to stall on the second PR restart.
+2. **PM context 1 state on the 2nd (and subsequent) `FRAG_PR`:**
+   PM context 1 always takes the **geometry's current catalogues and ALIST/MLIST stack
+   pointers again** (it does **not** continue from the previous PR's state). Because the
+   geometry HWRTData remains in `active_hwrtdata[0]` while TA is paused in OOM, loading the
+   HWRTData into PM context 1 first saves PM context 0's live catalogues/stack pointers
+   (`0x1248`/`0x1250`/`0x1260`, `0x0270/0x0274`, `0x02C0`) into `rogue_fwif_hwrtdata`
+   (without clearing `active_hwrtdata[0]` while SPM is active) and then loads them fresh
+   into PM context 1 (`active_hwrtdata[1]` was cleared at the end of the previous PR).
+3. **ZLS and background-object programming for `FRAG_PR` and final 3D after a PR:**
+   Let `has_pr = (hwrtdata.flags & 0x8) != 0` (0 on the 1st `FRAG_PR`; 1 on the 2nd+
+   `FRAG_PR` and on the final normal 3D render after any PR).
+   - **ZLS base addresses:** always program `cmd_3d.isp_zload_store_base` to both
+     `BCAST[0x0F50/0x0F54]` and `BCAST[0x0F58/0x0F5C]`, and `cmd_3d.isp_stencil_load_store_base`
+     to both `BCAST[0x0F60/0x0F64]` and `BCAST[0x0F68/0x0F6C]`. On-demand
+     `ZSBUFFER_BACKING` is only requested when `cmd_geom.pr_buffer_fw_addr[]` is non-zero;
+     when the host already backed the depth/stencil buffer (as in `vkfwtest bigpb`),
+     `pr_buffer_fw_addr[]` is 0 and the command's own ZLS bases are used directly.
+   - **Forced Z/S store on every `FRAG_PR`:**
+     - if `cmd_3d.flags & 0x80` (`DEPTHBUFFER`): `isp_zlsctl_lo |= 0x80004` (Z-store + ZLS enable);
+     - if `cmd_3d.flags & 0x100` (`STENCILBUFFER`): `isp_zlsctl_lo |= 0x40004` (S-store + ZLS enable);
+     - when either bit is set, OR `0x20` into `BCAST[0x06D0]` (`0x3F` instead of `0x1F`,
+       unless `cmd_3d.flags & 0x8000` forces `0x7F`).
+   - **Forced Z/S load and `pds_pr_bgnd` whenever `has_pr != 0` (2nd+ `FRAG_PR` and final 3D):**
+     - if `cmd_3d.flags & 0x80` (`DEPTHBUFFER`): `isp_zlsctl_lo |= 0x8002` (Z-load + ZLS enable);
+     - if `cmd_3d.flags & 0x100` (`STENCILBUFFER`): `isp_zlsctl_lo |= 0x4002` (S-load + ZLS enable);
+     - load `BCAST[0x06A0..0x06BC]` from **`pds_pr_bgnd0..3`** (`cmd_3d + 0x1C8..0x1DF`)
+       instead of `pds_bgnd0..3`, and set `BCAST[0x0F88] |= 0x200`;
+     - on the **1st** `FRAG_PR` (`has_pr == 0`), keep the normal `pds_bgnd0..3` (`cmd_3d +
+       0x198..0x1AF`) and do **not** force Z/S load (only store).
+     - `ROGUE_CR_ISP_CTL`: on the 1st `FRAG_PR` (`has_pr == 0`), if `pds_bgnd !=
+       pds_pr_bgnd` or `cmd_3d.flags & 0x80000`, set bit 17 (`|= 0x20000`); when `has_pr !=
+       0`, clear bit 17 unless `cmd_3d.flags & 0x100000` (or `cmd_3d.flags & 0x80000` on
+       the final normal 3D).
 
 ## States and flags
 

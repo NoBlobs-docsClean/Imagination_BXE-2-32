@@ -94,6 +94,8 @@ Read **[1] Clean-room process** first. In short:
 26. [Board testing and acceptance oracle](board-testing-oracle.md) — hardware safety,
     `.fw` pre-flight checks, acceptance oracle (`vkfwtest`, `dEQP-VK` suites, runtime PM
     suspend/resume, HWR recovery) and reference pass counts on the K1.
+27. [`vkfwtest` reference results](vkfwtest-results.md) — side-by-side black-box `vkfwtest`
+    baselines on the K1 (vendor stack vs. mainline `powervr` + Mesa `pvr`).
 
 ---
 

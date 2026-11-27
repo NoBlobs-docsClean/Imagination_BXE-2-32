@@ -290,6 +290,11 @@ The command fields of these renders map as in the tables above and in phase B.
 - Pipe reset: `BCAST[ROGUE_CR_ISP_RENDER]` (`0x0F08`) `= 0`, `BCAST[0x0618] = 0x80`,
   `BCAST[0x0620]` = `cmd+0x80`, `BCAST[0x0628]` = `cmd+0x74`, `BCAST[0x0F10] = 0`,
   `BCAST[0x0FC8] = 0`, `BCAST[0x0FCC] = 0`.
+- PM partial-render / CSW control (primary core bank, **D**): write **`CR[0x01C0] = 1`** on
+  a partial render (`FRAG_PR`, alongside `CR[0x0338] = 1`) and **`CR[0x01C0] = 0`** on a
+  normal 3D render; when not resuming a 3D context store, write `CR[0x0298] = 0` and
+  `CR[0x01C8] = 0`. See [partial-render-spm](partial-render-spm.md) for the full `FRAG_PR`
+  ZLS and `pds_pr_bgnd` rules (Q30).
 - Output/PBE: same **two-bank** layout as the transfer kick (see "Output / PBE state"
   below) — **WORD0 of render target *n* → `BCAST[0x1510 + 8·n]`, WORD1 → `BCAST[0x1550 + 8·n]`**
   (8 targets; 16 writable 64-bit registers `0x1510…0x1588`). The source is the frag command's
