@@ -128,6 +128,45 @@ bank per PM context: `0x20B8` geometry, `0x2078` fragment) are given in
 [kick-geometry-ta](kick-geometry-ta.md) (Q16e–Q16g), including the live stack pointers
 (global `0x20C8`/`0x2088`, local `0x0348`/`0x0350`).
 
+## Resuming geometry after OOM (answers Q28, D/O)
+
+1. **Which freelist is extended on OOM:** the firmware does **not** read a hardware
+   register to identify which freelist ran out. It always selects the HWRTData's **global**
+   freelist: `freelists_fw_addr[1]` for the primary geometry pipe (or `freelists_fw_addr[2]`
+   when `hwrtdata.flags & 0x100` is set for a secondary geometry pipe).
+2. **Resuming with `ready_pages` (`OOM: Resumed TA with ready pages`):**
+   after pausing (`CR[0x02A0] = 1`, poll `CR[0x02A8] & 1 == 1`), updating the freelist base
+   and stack pointer, and unpausing (`CR[0x02A0] = 0`, poll `CR[0x02A8] & 1 == 0`), write:
+   ```text
+   CR[0x0328] = 1          // primary core bank — resumes the PM / TA after freelist update
+   ```
+   This single write is what makes the stalled geometry continue (neither re-clearing
+   `PM_OUT_OF_MEMORY` nor re-writing `CR[0x0400] = 1` resumes it).
+3. **Pausing geometry when no `ready_pages` are available (entering `wait for grow` or
+   `PR blocked`):**
+   ```text
+   CR[0x0320] = 1                          // request TA stop on OOM
+   poll CR[0x0130] (EVENT_STATUS) bit 6 = 1  // TA_TERMINATE
+   CR[0x0138] = 0x40                       // clear EVENT_STATUS bit 6
+   CR[0x0CF0] = 1                          // pause TE/TA state
+   poll CR[0x0CF0] & 1 == 0
+   ```
+4. **Resuming geometry after `FREELIST_GROW_UPDATE` (`SPM State = PR avoided` →
+   `Resume TA without partial render`):**
+   set `hwrtdata.state = 1`, then write both:
+   ```text
+   CR[0x0328] = 1          // resume PM
+   CR[0x0CF8] = 1          // resume TE/TA paused by 0x0CF0
+   ```
+5. **Restarting geometry after a partial render (`SPM State = PR executed` →
+   `Restart TA after partial render`):**
+   - save the 3D PM context's catalogue bases and invalidate the active 3D HWRTData slot
+     (see fidelity note below);
+   - set `hwrtdata.state = 1`, update `CR[0x03D0]`/`CR[0x03D4]` for the geometry PM context;
+   - write `CR[0x0290] = 1`, then `CR[0x0198] = 1`, then invalidate the PM MMU cache;
+   - write `CR[0x01B8] = 1` and poll `CR[0x01B8] & 1 == 0`;
+   - write `CR[0x0328] = 1` and `CR[0x0CA8] = 1` to restart the TA.
+
 ## States and flags
 
 The public trace strings name the states the SPM goes through (trace group SPM):

@@ -914,20 +914,30 @@ job, or they are cleared at its end. Settling it needs a view of the writes duri
 
 ### E. Enable the context and broadcast the configuration
 
-- `CR[set+0xC68] = 1`, then **poll** `CR[set+0xC68]` until bit 0 = 1 (context
-  acceptance). Must complete before the trigger.
-- **Observed (answers Q16l item 2, O).** With the original firmware, `0x0C68` reads **0 at
-  rest** at every kick of a run, including the second and later kicks of a process. At each
-  geometry kick:
-  1. it reads 1 for ≤ 20 µs, while `0x0D00` bit 5 is clear (`0x3F` → `0x1F`);
-  2. it is back to 0 (`0x0D00` → `0x3F`) about 60 µs **before** the kick counter `0x0420`
-     increments and the geometry starts.
-
-  So in the original the "write 1, poll for 1" step **succeeds at every kick**, not only the
-  first one. Nothing happens to `0x0C68` at geometry completion: the 1 → 0 return happens
-  **during the kick**, after the acceptance and before the trigger. Which action returns it
-  to 0 (a write of 0, or hardware once the context is accepted) is not visible
-  (`TO CONFIRM`).
+- **`CR[set+0xC68] = 1` (FIRSTKICK only), then poll `CR[set+0xC68]` until bit 0 == `0`**
+  (correction to earlier Q16l note, **D/O**): the register is **self-clearing** — hardware
+  clears bit 0 back to `0` once region-header initialisation completes. Polling for bit 0
+  `== 1` races with hardware clearing it and fails on later kicks.
+- **Zeroing TA caches and RTC on `FIRSTKICK` (answers Q19b item 3 & Q29, D/O):**
+  when `hwrtdata.geom_caches_need_zeroing` (`+0x114`) is non-zero on a `FIRSTKICK`, the
+  firmware does **not** zero them through a hardware register; it temporarily maps GPU
+  memory and zeroes it with the MIPS CPU:
+  1. the TPC buffer at `hwrtdata.tail_ptrs_dev_addr` (`+0xF0`), size
+     `hwrtdata_common.tpc_size` (`+0x1C`) bytes;
+  2. the RTC buffer at `hwrtdata.rtc_dev_addr` (`+0x108`), size `0x300` bytes (when
+     `rtc_dev_addr != 0`).
+  It then sets `hwrtdata.geom_caches_need_zeroing = 1`, writes **`CR[0x0258] = 1`** and
+  polls **`CR[0x0258] & 1 == 0`**. (On a non-`FIRSTKICK`, it writes `CR[0x0250] = 1` and
+  polls `CR[0x0250] & 1 == 0` instead.)
+- **RTC and `macrotile_array_dev_addr` programming (answers Q16n item 2, D):**
+  - `hwrtdata.macrotile_array_dev_addr` (`+0xF8`) is **not** written to any register by the
+    geometry or fragment kick on this GPU.
+  - `hwrtdata.rtc_dev_addr` (`+0x108`):
+    - when `0`: `CR[0x0CE0] = 1` on `FIRSTKICK` (with `CR[0x0D20] = 0`) or `3` on
+      subsequent kicks; `CR[0x0CB0..0x0CB4] = 0`; `CR[0x0CB8] = 1`;
+      `CR[0x0D20] = rta_ctl.active_render_targets`.
+    - when non-zero: `CR[0x0CB0..0x0CB4] = rtc_dev_addr`; `CR[0x0C48] = hwrtdata_common.tpc_stride`;
+      `CR[0x0CE0] = 0`; `CR[0x0CB8] = 1`; `CR[0x0D20] = rta_ctl.active_render_targets`.
 - `0x0408`/`0x040C` receive the VDM control-stream base (`vdm_ctrl_stream_base`, observed
   in phase C), not a freelist/ALIST configuration as earlier versions said. The pair
   `0x0418`/`0x041C` holds `geom_reg_vdm_call_stack_pointer_init` (see Q16c above).
@@ -959,15 +969,33 @@ name) is **not** routed to the IRQ task, so a firmware that follows this routing
 geometry on `TA_FINISHED` alone. When the hardware raises `TA_TERMINATE` is not
 established by this spec.
 
+**TPC flush, VHEAP store, and completion sequence (answers Q19b item 1 & Q29, D/O).**
+At every `TA finished` (`EVENT_CLEAR = 0x20`, primary core bank):
+
+1. **VHEAP store (non-`LASTKICK` or context store only):**
+   write **`CR[0x0260] = 1`** and poll **`CR[0x0260] & 1 == 0`**.
+2. **TPC flush (every `TA finished`):**
+   write **`CR[0x0C50] = 0x40000000`** (bit 30).
+3. **RTC flush (only when `CR[0x0CB0..0x0CB4] != 0`):**
+   write **`CR[0x0CB8] = 2`** and poll **`CR[0x0CB8] & 2 == 0`**.
+4. **Wait for TPC flush completion:**
+   poll **`CR[0x0C50] & 0x40000000 == 0`**.
+5. **Clear `geom_caches_need_zeroing` on normal `LASTKICK`:**
+   if `cmd.flags & 2` (`LASTKICK`) and no context store occurred, write
+   `hwrtdata.geom_caches_need_zeroing = 0` (`+0x114`).
+6. **Geometry completion cache flush (DM 2):**
+   run the full geometry variant in [kick-compute-and-3d](kick-compute-and-3d.md)
+   ("Completion: per-job cache flush", DM 2 column) **before** retiring the command.
+
+Omitting the TPC flush (`CR[0x0C50] = 0x40000000` + poll) leaves tail pointers unflushed
+in hardware and stalls or faults subsequent renders (including multi-render sequences on
+the same device and input-attachment second subpasses).
+
 **Freelist write-back (part of Q19, O).** The freelist state reached by the geometry is
 captured when the freelists are **stored from PM context 0 at the fragment kick** of the same
 HWRTData (phase B, step 3), not at `TA finished`. The fields involved are the ones the trace
 prints: stack top, current pages, allocated page count. Geometry completion itself is traced
 as `TA finished` then `TA RTData … finished on HW context 0`.
-
-`PENDING`: the registers the PM state is read back from, the HWRTData fields updated after
-the TA, the context registers of phase D, and the full geometry variant of the completion
-cache flush.
 ## Confidence and pending items
 
 - **High confidence:** the phases and their dependencies (preconditions → PM → register

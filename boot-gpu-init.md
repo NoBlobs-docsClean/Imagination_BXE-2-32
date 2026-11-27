@@ -43,33 +43,60 @@ where a poll is shown.
    `BCAST[ROGUE_CR_SLC_CTRL_BYPASS] |= 0x01000000`, and the high word `|= 0x2000`.
 4. **Reset pulse.** Pulse `BCAST[0x6000] = 1` then `= 0` (no public name).
 5. **PDS/USC execution bases** (see the dedicated section below).
-6. **Fixed block of unit-default writes.** A block of FW-only unit configuration (registers
-   with no public name), required for the USC/TPU/MCU/VDM units to work. Required values
-   (**D**/**O**):
+6. **Fixed block of unit-default writes (part 1 — before init-done polls).** A block of
+   FW-only unit configuration (registers with no public name), required for the
+   USC/TPU/MCU/VDM units to work. Required values (**D**/**O**):
 
    | Register(s) | Value |
    |---|---|
    | `BCAST[0x18C0]`, `[0x18C8]`, `[0x18D0]`, `[0x18E0]` | `0x007FC000` |
    | `BCAST[0x0600]` | `0x403F3F00` |
    | `BCAST[0x0604]` | `0x00800000` |
-   | `BCAST[0x4050]` | over-allocation temp-register count `| 0x2000` |
-   | `BCAST[0x06D8]` | over-allocation shared-register count |
+   | `BCAST[0x4050]` | `0x2000` by default (or breakpoint over-allocation temp-register count `\| 0x2000`) |
+   | `BCAST[0x06D8]` | `0` by default (or breakpoint over-allocation shared-register count) |
    | `BCAST[0x0720]` | `0x0000000F` |
    | `BCAST[0x0640]` | `0x9`; `BCAST[0x0698]` = `0xB`; `BCAST[0x0630]` = `1`; `BCAST[0x0658]` = `0xB`; `BCAST[0x06C0]` = `0xD`; `BCAST[0x0648]` = `1`; `BCAST[0x0608]` = `1` |
+
+7. **Init-done handshakes.** `BCAST[0x4068] = 1`, then **poll** `0x4068` until bit 0 = 0;
+   `BCAST[0x0660] = 1`; `BCAST[0x0670] = 1`; `BCAST[0x0CD8] = 1`, then **poll** `0x0CD8`
+   until bit 0 = 0. (No public names; both polls must succeed before the first kick.)
+8. **Fixed block of unit-default writes (part 2 — after init-done polls).** Required values
+   (**D**/**O**):
+
+   | Register(s) | Value |
+   |---|---|
    | `BCAST[0x18E8]`, `[0x18F0]`, `[0x18F8]`, `[0x1900]` | `0xF` (open variant) |
    | `BCAST[0x1498]`, `[0x0700]` | `1` |
    | `BCAST[0x0358]` | `5` |
    | `BCAST[0x20F8]` | `1`; `BCAST[0x2010]` = `0`; `BCAST[0x2100]` = `0` |
    | `BCAST[0x13F8]` | `7` |
 
-7. **Init-done handshakes.** `BCAST[0x4068] = 1`, then **poll** `0x4068` until bit 0 = 0;
-   `BCAST[0x0660] = 1`; `BCAST[0x0670] = 1`; `BCAST[0x0CD8] = 1`, then **poll** `0x0CD8`
-   until bit 0 = 0. (No public names; both polls must succeed before the first kick.)
-8. **TPU trace/filter mode** from `sysinit.filter_flags` (register `0x17B8`, no public
-   name).
-9. **Per-core index registers** for multicore (`0xF318`/`0xF338`, no public name) — a single
-   core on this SoC.
-10. Mark GPU units initialised (internal state) and emit trace MAIN id 69 `GPU Units init`.
+9. **TPU filter/truncation mode and TPU/PBE/ISP unit defaults (part 3 — required for
+   accurate texture sampling / TQ_3D NPOT & offset copies, D/O):**
+   - Program `BCAST[0x17B8]` (no public name) from `sysinit.filter_flags`:
+     - select `mode = 8` by default and whenever `(sysinit.filter_flags & 0x4) != 0`;
+     - select `mode = 4` when `(sysinit.filter_flags & 0x4) == 0` and `(sysinit.filter_flags & 0x8) != 0`;
+     - write `BCAST[0x17B8] = mode`, then read `val = CR[0x17B8]` and write `BCAST[0x17B8] = val | 2`
+       (so bit 1 is always set, yielding `0xA` by default or `0x6` for the `0x8` flag).
+   - Write the remaining TPU/PBE/ISP/TE unit defaults (all broadcast, no public names):
+
+     | Register(s) | Value |
+     |---|---|
+     | `BCAST[0x1780]` | `0x21` |
+     | `BCAST[0x0C90]`, `[0x0C94]` | `0x3089705F` |
+     | `BCAST[0x1500]` | `0x80` |
+     | `BCAST[0x1710]` | `0x90000000`; `BCAST[0x1714]` = `0` |
+     | `BCAST[0x15A0]` .. `BCAST[0x15DC]` (16 × 32-bit words, stride 4) | `0` |
+     | `BCAST[0x0C78]` | `0x88` |
+     | `BCAST[0x0708]` | `1` |
+     | `BCAST[0x0FA0]` | `0x88` |
+     | `BCAST[0x06B0]`, `[0x0470]`, `[0x0240]` | `0` |
+     | `BCAST[0x0244]` | `0x80` |
+     | `BCAST[0x1788]`, `[0x178C]` | `0x20` |
+
+10. **Per-core index registers** for multicore (`0xF318`/`0xF338`, no public name) — a single
+    core on this SoC (`core 0 -> 0`).
+11. Mark GPU units initialised (internal state) and emit trace MAIN id 69 `GPU Units init`.
 
 ### PDS/USC execution bases (answers the clean team's Q7)
 

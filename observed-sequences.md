@@ -70,14 +70,24 @@ kick 3D of the higher-priority context
 "*** 3D FWCtx <ctx> resume"   ->  "Kick 3D: … CSW resume:1"          // CSW id 8, MAIN id 120
 ```
 
-Observed facts:
-- **Geometry (DM 2) is not preempted**: a higher-priority request waits for the TA to
-  finish.
+Observed facts and register-level store/resume triggers (answers Q24, O/D):
+- **3D (DM 3) store:** write `BCAST[0x1000] = 1` (only while `(ROGUE_CR_ISP_RENDER & 3) != 3`
+  and not running a partial render). Completion arrives via the normal 3D completion event;
+  resume sets `ROGUE_CR_ISP_RENDER |= 0x10` after reloading per-core state (`CR[0x1020]`,
+  `CR[0x0298]`, `CR[0x01C8]`).
+- **CDM (DM 4) store:** write `BCAST[0x0488] = 1`. Completion arrives via the normal
+  compute completion event; resume reloads saved state from `rogue_fwif_cdm_registers_cswitch`
+  with `CSW resume:1`.
+- **TA (DM 2) store/resume [D]:** when CSW is enabled for geometry, store programs
+  `CR[0x0428]` (VDM state base), `CR[0x0CC0]` (TA state base), and the store-task words
+  `CR[0x0438/0x0440/0x0448/0x0450/0x0458/0x0460]` from `rogue_fwif_geom_registers_caswitch`
+  (alternating state buffer A/B), then triggers **`CR[0x0468] = 1`**. On `TA_FINISHED`,
+  poll `CR[0x0430] & 1 == 1`; if `CR[0x0430] & 2 != 0`, save the 64-bit VDM call-stack
+  pointer `CR[0x0418..0x041C]` into the context state and mark `NEED_RESUME`. On resume,
+  flip the A/B buffer selector and reload `BCAST[0x0408/0x040C]` and `CR[0x0418..0x041C]`.
 - With the open firmware and the mainline driver, preemption only happens if the OS config
   flags enable CSW on the DM (`ROGUE_FWIF_INICFG_OS_CTXSWITCH_*_EN`; they default to `0`,
   so no CSW). See [data-structures](data-structures.md) (config flags).
-- The context store saves into a *snapshot buffer*; the resume reloads the `shader state`
-  and sets `CSW resume:1` in the next kick.
 
 ## PB out of memory and freelist grow (SPM)
 

@@ -483,11 +483,20 @@ with the observations but unverified:
 **Fields the transfer kick reads (answers Q25).** The table above is the whole kick. In
 particular the firmware does **not** read `isp_xtp_pipe_enable` (feature
 `S7_TOP_INFRASTRUCTURE` is absent), reads no `flags` bit except bit 1
-(`ROGUE_TRANSFER_FLAGS_SINGLE_CORE`) and bit 0 (no public name; it changes how the DM 3
-memory context is bound, `TO CONFIRM` in what way), and always writes the PBE words of render targets 0–2 (six of
-the nine `pbe_wordx_mrty` entries), whatever the number of targets in use. A transfer that
-completes but produces wrong bytes is therefore not explained by an ignored transfer field.
-Look at what the host puts in the fields and in the end-of-tile program instead.
+(`ROGUE_TRANSFER_FLAGS_SINGLE_CORE`) and bit 0 (no public name; passed as the secure-context
+flag when binding the DM 3 memory context), and always writes the PBE words of render
+targets 0–2 (six of the nine `pbe_wordx_mrty` entries), whatever the number of targets in
+use.
+
+On this board (mainline `powervr` + Mesa), `dEQP-VK.api.copy_and_blit.core.image_to_image.simple_tests.*`
+passes **23/23** (0 failures) on the reference firmware (**O**), so NPOT / offset / mirror
+copy mismatches are **not** host/Mesa bugs. While no per-kick transfer field is missing from
+the table above, texture coordinate rounding and pixel-output behaviour depend on the
+**TPU/PBE/ISP unit defaults programmed at GPU init** — specifically `BCAST[0x17B8]` (TPU
+filter/truncation mode from `sysinit.filter_flags`, with bit 1 forced set to yield `0xA` or
+`0x6`), `BCAST[0x1780] = 0x21`, `BCAST[0x1788] = 0x20`, `BCAST[0x178C] = 0x20`,
+`BCAST[0x1710/0x1714]`, `BCAST[0x1500] = 0x80`, `BCAST[0x15A0..0x15DC] = 0`, and
+`BCAST[0x0FA0] = 0x88` (all now listed in [boot-gpu-init](boot-gpu-init.md) step 9).
 
 **Completion:** a TQ_3D ends on **`PIXELBE_END_RENDER`** (`ROGUE_CR_EVENT_STATUS` bit 3), the
 same event as a normal 3D render. `0x06B0` is **not** written by the transfer kick.
@@ -512,22 +521,50 @@ The flush depends on the context's DM (`rogue_fwif_fwcommoncontext.dm`). Transfe
 use `PVR_FWIF_DM_FRAG`, so a TQ_3D gets the fragment variant. All writes are broadcast.
 "Poll" means: wait on every enabled core until the written bit clears.
 
-| Step | Fragment / transfer (`dm` = FRAG) | Compute (`dm` = CDM) |
-|---|---|---|
-| 1 | `0x4000 = 1` | `0x4000 = 1` |
-| 2 | `0x0688 = 2`, poll bit 1 | `0x0688 = 4`, poll |
-| 3 | `0x0668 = 3`, poll bit 0 | `0x0668 = 9`, poll bit 0 |
-| 4 | `0x1608 = 0x38001`, poll bit 0 | `0x1608 = 0x10001`, poll bit 0 |
-| 5 | `0x1480 = 1`, `0x1488 = 1` | `0x1488 = 1` |
-| 6 | `ROGUE_CR_MCU_FENCE = 0x00000180_00000000` (`DM` field = `DM_PIXEL`) | `ROGUE_CR_MCU_FENCE = 0x00000280_00000000` (`DM` field = `DM_COMPUTE`) |
-| 7 | `0x1720 = 0x2B`, poll `0x1728` bit 0 | `0x1720 = 0x33`, poll `0x1728` bit 0 |
-| 8 | write barrier (see [execution-environment](execution-environment.md)) | — |
-| 9 | `ROGUE_CR_SLC_CTRL_FLUSH_INVAL = 6` (`DM_TA \| DM_PIXEL`), poll `ROGUE_CR_SLC_STATUS0` bit 2 | `ROGUE_CR_SLC_CTRL_FLUSH_INVAL = 8` (`DM_COMPUTE`), poll `ROGUE_CR_SLC_STATUS0` bit 2 |
+| Step | Fragment / transfer (`dm` = FRAG) | Compute (`dm` = CDM) | Geometry (`dm` = GEOM, answers Q19b) |
+|---|---|---|---|
+| 1 | `0x4000 = 1` | `0x4000 = 1` | `0x4000 = 1` |
+| 2 | `0x0688 = 2`, poll bit 1 | `0x0688 = 4`, poll bit 2 | `0x0688 = 1`, poll bit 0 |
+| 3 | `0x0668 = 3`, poll bit 0 | `0x0668 = 9`, poll bit 0 | `0x0668 = 5`, poll bit 0 |
+| 4 | `0x1608 = 0x38001`, poll bit 0 | `0x1608 = 0x10001`, poll bit 0 | `0x1608 = 0x10001`, poll bit 0 |
+| 5 | `0x1480 = 1`, `0x1488 = 1` | `0x1488 = 1` | `0x1488 = 1` |
+| 6 | `ROGUE_CR_MCU_FENCE = 0x00000180_00000000` (`DM_PIXEL`) | `ROGUE_CR_MCU_FENCE = 0x00000280_00000000` (`DM_COMPUTE`) | `ROGUE_CR_MCU_FENCE = 0x00000080_00000000` (`DM_TA`) |
+| 7 | `0x1720 = 0x2B`, poll `0x1728` bit 0 | `0x1720 = 0x33`, poll `0x1728` bit 0 | `0x1720 = 0x27`, poll `0x1728` bit 0 |
+| 8 | write barrier ([execution-environment](execution-environment.md)) | — | write barrier |
+| 9 | `ROGUE_CR_SLC_CTRL_FLUSH_INVAL = 6` (`DM_TA \| DM_PIXEL`), poll `ROGUE_CR_SLC_STATUS0` bit 2 | `ROGUE_CR_SLC_CTRL_FLUSH_INVAL = 8` (`DM_COMPUTE`), poll `ROGUE_CR_SLC_STATUS0` bit 2 | `ROGUE_CR_SLC_CTRL_FLUSH_INVAL = 2` (`DM_TA`), poll `ROGUE_CR_SLC_STATUS0` bit 2 |
 
 None of `0x4000`, `0x0688`, `0x0668`, `0x1608`, `0x1480`, `0x1488`, `0x1720`, `0x1728` has a
 public name. They are steps of the front-end, USC/PDS, TPU and MCU cache flush that precedes
-the SLC flush. Their individual roles are inferred, not established. A geometry variant
-exists as well (`0x0688 = 1`, `0x0668 = 5`, SLC `DM_TA`).
+the SLC flush. Their individual roles are inferred, not established.
+
+### Render-target arrays (`gs_rta_support`, firmware v1.1 — answers Q27, P/D)
+
+When `hwrtdata.rta_ctl.active_render_targets` (`hwrtdata+0xD8`) is non-zero, a single
+fragment command renders one or more array layers in sequence using `rta_ctl`
+(`render_target_index` at `+0xD0`, `current_render_target` at `+0xD4`,
+`active_render_targets` at `+0xD8`, `valid_render_targets_fw_addr` at `+0xE0`, `max_rts` at
+`+0xE8`):
+
+1. **Per-layer region headers (`BCAST[0x0F20/0x0F24]`):**
+   ```text
+   layer     = hwrtdata.rta_ctl.current_render_target
+   rgn_stride = align_up(hwrtdata_common.rgn_header_size * 6, 4096)
+   BCAST[0x0F20/0x0F24] = hwrtdata.rgn_header_dev_addr + rgn_stride * layer
+   ```
+2. **Per-layer PBE array addressing (`BCAST[0x1550 + 8*n]`):**
+   when `hwrtdata.rta_ctl.max_rts >= 2`, for each MRT `n` (`0..7`) whose PBE word 0 high
+   half has `(word0_hi & 3) == 2` (array/layered target), add `layer` to bits `27:14` of
+   PBE word 1 (`BCAST[0x1550 + 8*n] = (val & 0xF0003FFF) | (((word1_lo >> 14) & 0x3FFF) + layer) << 14`).
+3. **Per-layer ZLS / SLS bases:**
+   when `layer != 0`, add `layer * cmd_frag.zls_stride` (64-bit) to `isp_zload_store_base`
+   and `layer * cmd_frag.sls_stride` (64-bit) to `isp_stencil_load_store_base`.
+4. **Layer loop at `PIXELBE_END_RENDER`:**
+   if `active_render_targets != 0` and `render_target_index < active_render_targets - 1`,
+   increment `render_target_index`, load
+   `current_render_target = valid_render_targets[render_target_index]`, log MAIN id 40
+   (`Kick RTA render %u of %u`), and re-kick DM 3 **before** retiring the command. On the
+   last layer (or when `active_render_targets == 0`), proceed with the DM 3 cache flush and
+   retire the command.
 
 **Answers to the three Q14 questions:**
 
