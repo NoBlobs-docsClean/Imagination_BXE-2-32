@@ -647,6 +647,17 @@ fragment command renders one or more array layers in sequence using `rta_ctl`
      `rta_num_partial_renders[current_render_target]++` at kick time; for subsequent PRs and
      the final 3D render, the per-layer `has_pr` flag (controlling forced Z/S load and
      `pds_pr_bgnd`) is `(hwrtdata.flags & 8) && (rta_num_partial_renders[current_render_target] > 0)`.
+7. **Layered `LOAD` + `vkCmdClearAttachments` subset layers (answers Q36, O/D):**
+   - **Observed (`O`):** with the **manufacturer open firmware v1.1 (`build 6976702 OS`)**
+     and the same RTA-enabled Mesa build, `vkfwtest rta` step 3 (`subset layer 1` / `subset
+     layer 5`) **fails identically** (layers 1 and 5 retain their previous contents, zero
+     faults). The missing clears are on the **Mesa `pvr` side**, not in the firmware.
+   - **Background object registers (`D`):** the fragment kick does **nothing** per layer to
+     `pds_bgnd0..3` (`0x06A0..0x06BC`), `isp_bgobjvals` (`0x0F88`), or `0x0F10` (always `0`)
+     for a `LOAD` render; they are written verbatim from the command on every layer.
+   - **Layer 0 in the RTC bitmap (`D`):** the firmware never writes to the RTC bitmap
+     (`rtc_dev_addr + 0x200`) during geometry; bit 0 being set alongside bits 1 and 5 comes
+     from the hardware / host VDM stream (default initial RT 0).
 
 ### Occlusion queries and remaining `rogue_fwif_frag_regs` (answers Q32, P/D)
 
