@@ -88,6 +88,48 @@ it, **re-init the units and rebuild the BIF catalogue** and then do the **per-DM
 skip/retire** before kicking the MTS. The MTS per-DM event routing is re-established as part
 of the units re-init (section B of boot-gpu-init).
 
+### Detailed bus quiesce and PM/TA state reset during HWR (answers Q29b item 4, D/O)
+
+When a geometry/fragment lockup occurs, `SOFT_RESET` alone is not enough to leave PM/TA
+usable for subsequent renders. The full per-core reset and PM/TA state teardown is:
+
+1. **Quiesce BIF/MMU/SLC before `SOFT_RESET`:**
+   - stall BIF/MMU requests (`CR[0x1340] |= 1`), poll `CR[0x1350] & 0xFF == 0` and
+     `CR[0x1338] & 0xFFFF == 0`;
+   - invalidate MMU caches (`0x1C`), issue a MIPS write barrier;
+   - poll `CR[0x03C8] & 0x20 == 0x20` and `CR[0x3898] & 0xFF == 0xFF` (SLC idle).
+2. **Two-stage `SOFT_RESET` assert and release:**
+   - assert `BCAST[0x0100] = 0x13FFFC1D`, `BCAST[0x0104] = 0xFFEFFE00`, flush D-cache +
+     write barrier;
+   - OR in `0x10610000` (low) and `0x00080004` (high), then release both words to `0`.
+3. **Post-reset unit & cache cleanup:**
+   - re-run GPU-units init ([boot-gpu-init](boot-gpu-init.md) section A);
+   - unstall BIF/MMU (`CR[0x1340] &= ~1`);
+   - write `BCAST[0x1608] = 0x78001` and poll `0x1608` bit 0 == `0`;
+   - flush/invalidate SLC (`BCAST[ROGUE_CR_SLC_CTRL_FLUSH_INVAL] = 1`, poll
+     `ROGUE_CR_SLC_STATUS0` bit 2 == `0`);
+   - rebuild the BIF page-catalogue table.
+4. **Reset PM/SPM hardware and firmware tracking state:**
+   - unpause PM allocation and deallocation: `BCAST[0x02A0] = CR[0x02A0] & ~3`;
+   - disable partial renders: `BCAST[ROGUE_CR_PM_PARTIAL_RENDER_ENABLE] = 0`;
+   - reset internal SPM state and SPM flags to `0`;
+   - **clear all tracked active PM HWRTData slots (PM ctx 0 and 1) and all tracked loaded
+     PM freelist slots to `0`** so the next geometry/fragment kick reloads them from scratch;
+   - **request `ROGUE_FWIF_FWCCB_CMD_FREELISTS_RECONSTRUCTION`** from the host for every
+     freelist that was loaded in any PM slot or attached to any active HWRTData. Because
+     `SOFT_RESET` discards the PM's live page-allocation state, skipping freelist
+     reconstruction leaves the freelists inconsistent and causes subsequent geometry kicks
+     (including on HWRTData 0) to stall;
+   - in DM 2 (GEOM) per-DM recovery, clear `hwrtdata.flags` bit 10 (`0x400`, mid-TA context
+     store resume flag);
+   - **do not clear `hwrtdata.geom_caches_need_zeroing` (`+0x114`)** during HWR. Leaving it
+     `1` causes the **next** `FIRSTKICK` on that HWRTData to CPU-zero the TPC
+     (`tail_ptrs_dev_addr`, `tpc_size`) and RTC (`rtc_dev_addr`, `0x300` bytes — which is
+     what emits `Zero RTC for FWCtx`), followed by `CR[0x0258] = 1`, `0x0290`/`0x0198`, and
+     `0x0C68 = 1` (see [kick-geometry-ta](kick-geometry-ta.md)).
+   - HWR does **not** touch `0x0D20` directly; the next geometry kick reprograms `0x0D20`
+     from `rta_ctl.active_render_targets`.
+
 ## HWR log (`rogue_fwif_hwrinfobuf`)
 
 Each recovery is logged in a `rogue_hwrinfo` entry (see

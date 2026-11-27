@@ -821,11 +821,96 @@ Ten partial renders were seen, with the same pattern each time. The values writt
 PM load commands cannot be seen (Q16k experiment A); the table gives what the registers
 hold.
 
-- **PM handshakes** (**D**, not observed directly):
-  - `CR[0x250] = 1`, then **poll** `CR[0x250]` until bit 0 = 1;
-  - `CR[0x258] = 1`, then **poll** `CR[0x258]` until bit 0 = 0.
+- **PM handshakes and per-HWRTData loading (answers Q29b items 1–3, D/O):**
+  1. **PM context-mode select (`CR[0x03D0]` / `CR[0x03D4]`):**
+     - When loading a geometry HWRTData (PM context 0): `CR[0x03D0] = 0x100`, `CR[0x03D4] = 1`.
+     - When loading a fragment HWRTData (PM context 1): `BCAST[0x03D0] = 0x10100`, `BCAST[0x03D4] = 1`.
+  2. **Save previous HWRTData on slot switch:**
+     - If the target PM slot already holds a different HWRTData, save its live
+       `PM_CAT_BASE_{VCE,TE,ALIST}` and live ALIST/MLIST stack pointers (`0x0270/0x0274`,
+       `0x02C0` for PM ctx 0; `0x0280/0x0284`, `0x02D0` for PM ctx 1) back to that
+       previous `rogue_fwif_hwrtdata`.
+     - When loading a 3D HWRTData into PM context 1 that is currently active in PM context 0,
+       save PM context 0's catalogues/stack pointers back to that HWRTData and clear the
+       active-HWRTData slot for PM context 0 (unless a partial render is active).
+  3. **PM-MMU / PM-TLB cache invalidation (mandatory on every `FIRSTKICK`, every HWRTData
+     switch in PM context 0 or 1, and every `3D finished`):**
+     ```text
+     BCAST[ROGUE_CR_SLC_CTRL_FLUSH_INVAL] = 0x10   // poll ROGUE_CR_SLC_STATUS0 (0x3820) bit 2 == 0
+     BCAST[ROGUE_CR_BIF_CTRL_INVAL]       = 4      // poll CR[0x12A0] bit 2 == 0
+     if GPU power domain is on:
+         BCAST[0x1348]                    = 1      // poll CR[0x1348] bit 0 == 0
+     ```
+     Omitting this invalidation leaves PM context 0/1 with stale page-catalogue/TLB entries
+     from the previous HWRTData, causing immediate BIF0/IPF page faults or TA stalls on the
+     second HWRTData.
+  4. **Load MLIST base (`0x02D8/0x02DC` for ctx 0, `BCAST[0x02E0/0x02E4]` for ctx 1) and
+     `PM_CAT_BASE_{VCE,TE,ALIST}`** from `rogue_fwif_hwrtdata`.
+  5. **Stack-pointer load triggers (non-`FIRSTKICK` only: Mid-TA on ctx 0, 3D on ctx 1):**
+     select the PM context in `0x03D0` bit 16 and `0x03D4` bit 8, write MLIST/ALIST stack
+     pointers (`0x02B8` + `0x0268/0x026C` for ctx 0; `0x02C8` + `0x0278/0x027C` for ctx 1),
+     then pulse:
+     - **`CR[0x0190] = 1`**, poll `CR[0x0190] & 1 == 0`;
+     - **`CR[0x0288] = 1`**, poll `CR[0x0288] & 1 == 0`.
+     These two pulses make the loaded stack pointers live in the PM (resolving Q16k
+     Experiment F). Do **not** run `0x0190`/`0x0288` on a `FIRSTKICK`.
+  6. **VHEAP & PM first-kick reset pulses (geometry kick, after writing `CR[0x0248/0x024C] = vheap_table_dev_addr`):**
+     - On **`FIRSTKICK`**:
+       - zero TPC/RTC if `hwrtdata.geom_caches_need_zeroing != 0` (see Phase E), then set
+         `hwrtdata.geom_caches_need_zeroing = 1`;
+       - write **`CR[0x0258] = 1`**, poll **`CR[0x0258] & 1 == 0`**;
+       - clear PM context 0 select bits (`CR[0x03D0] &= ~0x10000`, `CR[0x03D4] &= ~0x100`)
+         and pulse **`CR[0x0290] = 1`**, then **`CR[0x0198] = 1`**.
+       On a freshly reset GPU, Render 1 (HWRTData 0) can pass without `0x0290`/`0x0198`
+       because internal PM state starts at 0; Render 2 (HWRTData 1) stalls without them.
+     - On **non-`FIRSTKICK` (Mid-TA)**:
+       - write **`CR[0x0250] = 1`**, poll **`CR[0x0250] & 1 == 0`**.
 
-  The polls must complete before phase C.
+  All polls must complete before phase C.
+
+- **Per-HWRTData memory writes & `HWRTData0State`/`HWRTData1State` (answers Q29b items 1 & 2, D/O):**
+  - Before the first kick of HWRTData 1, the firmware writes **nothing** to `hwrtdata_common`
+    or region-header memory (hardware initialises region headers via `CR[0x0C68] = 1` + poll
+    bit 0 == 0). `geom_caches_need_zeroing` (`+0x114`) lives in each `rogue_fwif_hwrtdata`
+    instance, not in `hwrtdata_common`.
+  - The firmware has **no** concept of a "pair" of HWRTData and **never** writes a pair index
+    to `te_psg`, `0x0D20`, or any PM register. Each command simply passes its own
+    `hwrtdata_fw_addr` (`cmd + 0x2C`).
+  - `HWRTData0State` and `HWRTData1State` in the `3D finished` trace line are simply the
+    `.state` (`+0xAC`) of the firmware's **PM context 0 active-HWRTData slot** and **PM
+    context 1 active-HWRTData slot** (`0x7fffffff` when a slot is empty — e.g.
+    `HWRTData0State=7fffffff, HWRTData1State=4` because PM ctx 0 was cleared when the 3D kick
+    loaded that HWRTData into PM ctx 1).
+
+- **Reference multi-render sequence from Render 1 `3D finished` to Render 2 `Kick TA` (answers Q29b item 3, O/D):**
+  Observed trace on the open v1.1 reference firmware (`RTD 0xc0143000` → `RTD 0xc0144000`):
+  ```text
+  [115296] : 3D finished, HWRTData0State=7fffffff, HWRTData1State=4
+  [115347] : UFO Updates for FWCtx 0xc0085098 @ 1136
+  [115359] : UFO Update: [0xc0084000] = 0x00000002
+  [115386] : Deactivate MemCtx=0xc002c000
+  [115396] : Ungrab reg set 4 refcount now 0
+  [117522] : cCCB Woff update = 400, DM = 2, FWCtx = 0xc0085000
+  [117564] : cCCB Woff update = 1800, DM = 3, FWCtx = 0xc0085098
+  [117591] : UFO Checks for FWCtx 0xc0085098 @ 1184
+  [117603] : UFO PR-Check: [0xc0079000] is 0x00000001 requires >= 0x00000002
+  [117667] : Activate MemCtx=0xc002c000 DM=2 secure=0
+  [117681] : Setup register set=4 DM=2, PC address=0x0000000083399000, OSid=0, NewPCRegRequired=0
+  [117696] : Grab reg set 4 refcount now 1
+  [117786] : Kick TA: FWCtx 0xc0085000 @ 200, RTD 0xc0144000, First kick:1, Last kick:1, CSW resume:0.
+  ```
+  Hardware register transitions between those two milestones (**D**):
+  1. `3D finished` (Render 1): `EVENT_CLEAR = 8` (or `0x4008` with ZLS) → DM 3 cache flush →
+     `RTD0.state` `4 → 5` → **PM-MMU invalidation** (`SLC_CTRL_FLUSH_INVAL = 0x10`,
+     `BIF_CTRL_INVAL = 4`, `0x1348 = 1`) → retire 3D command → deactivate MemCtx.
+  2. `Kick TA` (Render 2, `RTD1`, `FIRSTKICK | LASTKICK`): activate MemCtx DM 2 →
+     `CR[0x03D0] = 0x100`, `CR[0x03D4] = 1` → freelists already match PM ctx 1 so
+     `CR[0x02B0] = 0` (no freelist reload) → **PM-MMU invalidation** (`0x10` / `4` / `0x1348`)
+     → `CR[0x02D8/0x02DC] = RTD1.pm_mlist_dev_addr` → `PM_CAT_BASE_{VCE,TE,ALIST}0 = 0` →
+     `CR[0x0248/0x024C] = RTD1.vheap_table_dev_addr` → **`CR[0x0258] = 1`** (poll 0) →
+     `CR[0x03D0] &= ~0x10000`, `CR[0x03D4] &= ~0x100`, **`CR[0x0290] = 1`**, **`CR[0x0198] = 1`**
+     → TE/VDM/RTC registers → `CR[0x40A8] = 0` → **`CR[0x0C68] = 1`** (poll 0) →
+     `CR[0x0400] = 1`.
 
 ### C. Program the geometry registers (command data)
 
@@ -853,15 +938,18 @@ two separates the values that depend on the target size from the constant ones:
 
 | Register | 256×256 | 1024×1024 | Reading |
 |---|---|---|---|
-| `0x0C98` | `0x00FF_00FF` | `0x03FF_03FF` | **x/y maximum in pixels** (width − 1, height − 1) |
-| `0x0C18` | `0x0000_F00F` | `0x0003_F03F` | **x/y maximum in 16×16 tiles** (tiles − 1) |
-| `0x0C08`, `0x0C10` | `0x0010_0000` | `0x0040_0000` | scales ×4 when each side grows ×4 (a per-row size or stride; `TO CONFIRM` which `hwrtdata_common` field) |
-| `0x0C20` | `0x10` | `0x100` | scales ×16, with the area (`TO CONFIRM`) |
+| `0x0C98` | `0x00FF_00FF` | `0x03FF_03FF` | `hwrtdata_common.screen_pixel_max` (`+0x04`) — x/y maximum in pixels (**D/O**) |
+| `0x0C18` | `0x0000_F00F` | `0x0003_F03F` | `hwrtdata_common.te_screen` (`+0x20`) — x/y maximum in 16×16 tiles (**D/O**) |
+| `0x0C08`, `0x0C10` | `0x0010_0000` | `0x0040_0000` | `hwrtdata_common.te_mtile1` (`+0x2C`), `te_mtile2` (`+0x30`) (**D/O**) |
+| `0x0C20` | `0x10` | `0x100` | `hwrtdata_common.mtile_stride` (`+0x24`) (**D/O**) |
+| `0x0C00` | `0` | `0` | `hwrtdata_common.te_aa` (`+0x28`) (**D**) |
+| `0x0C80`/`0x0C84` | `0x88` | same | `hwrtdata_common.multi_sample_ctl` (`+0x08`), or `flipped_multi_sample_ctl` (`+0x10`) when `te_aa != 0 && (cmd.flags & 4)` (**D**) |
 | `0x0C30`, `0x0C34` | `2`, `3` | same | constant |
-| `0x0C48` | `8` | same | constant |
+| `0x0C48` | `8` | same | `hwrtdata_common.tpc_stride` (`+0x18`, written when `rtc_dev_addr != 0`) (**D/O**) |
 | `0x0C70` | `3` | same | constant |
-| `0x0C78`, `0x0C80` | `0x88` | same | constant |
-| `0x0C90`/`0x0C94` | `0x3089_705F` ×2 | same | constant 64-bit value (candidate: `multi_sample_ctl`, which is 64-bit and fixed per sample count; `TO CONFIRM`) |
+| `0x0C78` | `0x88` | same | boot default (`boot-gpu-init.md` step 9) |
+| `0x0C90`/`0x0C94` | `0x3089_705F` ×2 | same | boot default (`boot-gpu-init.md` step 9) |
+| `0x4098` (8-bit) | `0` | same | `cmd_geom.pds_ctrl` (byte at `cmd_geom + 0x6C`) (**D**) |
 | `0x0CA0` | `0x10` | same | constant |
 | `0x0CE0` | `1` | same | constant |
 | `0x0D00` | `0x3F` | 0…`0x3F`, varying | hardware status that changes during the job, not configuration |
