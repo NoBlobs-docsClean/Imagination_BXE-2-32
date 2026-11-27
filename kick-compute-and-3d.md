@@ -542,34 +542,106 @@ None of `0x4000`, `0x0688`, `0x0668`, `0x1608`, `0x1480`, `0x1488`, `0x1720`, `0
 public name. They are steps of the front-end, USC/PDS, TPU and MCU cache flush that precedes
 the SLC flush. Their individual roles are inferred, not established.
 
-### Render-target arrays (`gs_rta_support`, firmware v1.1 — answers Q27, P/D)
+### Render-target arrays (`gs_rta_support`, firmware v1.1 — answers Q27, Q31, Q33, P/D)
 
 When `hwrtdata.rta_ctl.active_render_targets` (`hwrtdata+0xD8`) is non-zero, a single
 fragment command renders one or more array layers in sequence using `rta_ctl`
 (`render_target_index` at `+0xD0`, `current_render_target` at `+0xD4`,
-`active_render_targets` at `+0xD8`, `valid_render_targets_fw_addr` at `+0xE0`, `max_rts` at
-`+0xE8`):
+`active_render_targets` at `+0xD8`, `cumul_active_render_targets` at `+0xDC` [unused],
+`valid_render_targets_fw_addr` at `+0xE0`, `rta_num_partial_renders_fw_addr` at `+0xE4`,
+`max_rts` at `+0xE8`):
+
+#### 1. How `active_render_targets` and `valid_render_targets[]` are populated (answers Q31)
+
+- **Hardware RTC bitmap (`hwrtdata.rtc_dev_addr != 0`):** the Render Target Cache buffer at
+  `rtc_dev_addr` (total size `0x300` bytes) contains a 256-byte (`0x100` bytes = 2048-bit)
+  bitmap at **`rtc_dev_addr + 0x200`**, where bit *k* (`0..2047`) is set by hardware for
+  each layer *k* touched by the TA. Register **`CR[0x0D20]`** holds the hardware count of
+  active layers.
+- **Lifecycle across TA → 3D:**
+  1. **Geometry `FIRSTKICK` (`rtc_dev_addr != 0`):** set `active_render_targets = 0`,
+     program `CR[0x0CB0/0x0CB4] = rtc_dev_addr`, `CR[0x0C48] = hwrtdata_common.tpc_stride`,
+     `CR[0x0CE0] = 0`, `CR[0x0CB8] = 1`, `CR[0x0D20] = 0`. If `hwrtdata.flags & 0x8` (prior
+     PR) and `rta_num_partial_renders_fw_addr != 0`, zero `rta_num_partial_renders[0 ..
+     max_rts - 1]` (`max_rts * 4` bytes) and clear `hwrtdata.flags &= ~0x8`.
+     *(When `rtc_dev_addr == 0`: set `active_render_targets = 0` on `FIRSTKICK` or `1` on
+     non-`FIRSTKICK`, `CR[0x0D20] = active_render_targets`, `render_target_index = 0`,
+     `current_render_target = 0`.)*
+  2. **Geometry `TA finished` (`CR[0x0CB0/0x0CB4] != 0`):** on a non-`LASTKICK` (or CSW),
+     read **`active_render_targets = CR[0x0D20]`** and flush the RTC (`CR[0x0CB8] = 2`,
+     poll bit 1 == 0). *(On `LASTKICK` with `CR[0x0CB0/0x0CB4] == 0` and no prior PR, set
+     `active_render_targets = 1`.)*
+  3. **Geometry `LASTKICK` (`rtc_dev_addr != 0`) and OOM before `FRAG_PR`:**
+     - On OOM (`CR[0x0CB0/0x0CB4] != 0`), read `active_render_targets = CR[0x0D20]`, wait
+       for TA idle, zero the first `0x200` bytes of `rtc_dev_addr` (`+0x000..+0x1FF`).
+     - Map **`rtc_dev_addr + 0x200`** (`0x100` bytes) and scan bits `0..2047` in ascending
+       order, writing the first `active_render_targets` set bit indices into
+       `valid_render_targets[0 .. active_render_targets - 1]`.
+     - Reset `render_target_index = 0` and set
+       `current_render_target = valid_render_targets[0]`.
+     - Only the layers with bits set in the RTC bitmap are listed in `valid_render_targets[]`
+       and rendered (if the host/Mesa split a 6-layer render with clears on all 6 layers,
+       all 6 bits are set in the RTC bitmap and `active_render_targets = 6`).
+  4. **End of 3D render:** after the last layer finishes, reset `render_target_index = 0`
+     (`active_render_targets` is reset on the next `FIRSTKICK`, not at 3D end).
+  5. **Unused fields:** `cumul_active_render_targets` (`+0xDC`), `rgnhdr_single_rt_size`
+     (`frag_regs + 440`) and `rgnhdr_scratch_offset` (`frag_regs + 444`) are **not** read
+     or written by the firmware on this GPU.
+
+#### 2. Per-layer 3D kick programming and `RENDER_TGT_ID` (answers Q27, Q33)
 
 1. **Per-layer region headers (`BCAST[0x0F20/0x0F24]`):**
    ```text
-   layer     = hwrtdata.rta_ctl.current_render_target
+   layer      = hwrtdata.rta_ctl.current_render_target
    rgn_stride = align_up(hwrtdata_common.rgn_header_size * 6, 4096)
    BCAST[0x0F20/0x0F24] = hwrtdata.rgn_header_dev_addr + rgn_stride * layer
    ```
-2. **Per-layer PBE array addressing (`BCAST[0x1550 + 8*n]`):**
-   when `hwrtdata.rta_ctl.max_rts >= 2`, for each MRT `n` (`0..7`) whose PBE word 0 high
-   half has `(word0_hi & 3) == 2` (array/layered target), add `layer` to bits `27:14` of
-   PBE word 1 (`BCAST[0x1550 + 8*n] = (val & 0xF0003FFF) | (((word1_lo >> 14) & 0x3FFF) + layer) << 14`).
-3. **Per-layer ZLS / SLS bases:**
+2. **Per-layer `RENDER_TGT_ID` (`BCAST[0x03D8]`, answers Q33):**
+   write **`BCAST[0x03D8] = hwrtdata.rta_ctl.current_render_target`** (`valid_render_targets[render_target_index]`)
+   on **every** 3D kick (once per layer). This is the hardware register that supplies
+   `RENDER_TGT_ID` (`PCO_SR_RENDER_TGT_ID`) to the end-of-tile USC program for **both** 2D
+   array images and 3D (`TWIDDLE_3D`) images. Omitting `BCAST[0x03D8]` causes every layer of
+   a 2D array image to write into layer 0.
+3. **Per-layer PBE 3D-slice offset (`BCAST[0x1550 + 8*n]`):**
+   when `hwrtdata.rta_ctl.max_rts >= 2`, for each MRT *n* (`0..7`) whose PBE word 0 high
+   half has `(word0_hi & 3) == 2` (`TWIDDLE_3D`), add `layer` to bits `27:14` of PBE word 1
+   (`BCAST[0x1550 + 8*n] = (val & 0xF0003FFF) | (((word1_lo >> 14) & 0x3FFF) + layer) << 14`)
+   as an extra on top of `BCAST[0x03D8]`.
+4. **Per-layer ZLS / SLS bases:**
    when `layer != 0`, add `layer * cmd_frag.zls_stride` (64-bit) to `isp_zload_store_base`
    and `layer * cmd_frag.sls_stride` (64-bit) to `isp_stencil_load_store_base`.
-4. **Layer loop at `PIXELBE_END_RENDER`:**
-   if `active_render_targets != 0` and `render_target_index < active_render_targets - 1`,
-   increment `render_target_index`, load
-   `current_render_target = valid_render_targets[render_target_index]`, log MAIN id 40
-   (`Kick RTA render %u of %u`), and re-kick DM 3 **before** retiring the command. On the
-   last layer (or when `active_render_targets == 0`), proceed with the DM 3 cache flush and
-   retire the command.
+5. **Defer PM memory free until the last layer (`CR[0x03E0]`):**
+   on the primary core bank, write **`CR[0x03E0] = 0`** for non-last layers
+   (`active_render_targets >= 2` and `render_target_index != active_render_targets - 1`),
+   and **`CR[0x03E0] = 1`** on the last layer (or when `active_render_targets == 0`).
+   Also skip PM-MMU invalidation on non-last layers (`hwrtdata` 3D-done runs it only when
+   `active_render_targets < 2` or `CR[0x03E0] & 1 != 0`).
+6. **Layer loop at `PIXELBE_END_RENDER` (applies to both normal 3D and `FRAG_PR`):**
+   - If `active_render_targets != 0` and `render_target_index < active_render_targets - 1`,
+     increment `render_target_index`, load
+     `current_render_target = valid_render_targets[render_target_index]`, log MAIN id 40
+     (`Kick RTA render %u of %u`), and re-kick DM 3 (preserving the partial-render mode
+     for `FRAG_PR`) **before** retiring the command or signalling `PR executed`.
+   - On `FRAG_PR`, if `rta_num_partial_renders_fw_addr != 0`, increment
+     `rta_num_partial_renders[current_render_target]++` at kick time; for subsequent PRs and
+     the final 3D render, the per-layer `has_pr` flag (controlling forced Z/S load and
+     `pds_pr_bgnd`) is `(hwrtdata.flags & 8) && (rta_num_partial_renders[current_render_target] > 0)`.
+
+### Occlusion queries and remaining `rogue_fwif_frag_regs` (answers Q32, P/D)
+
+1. **`isp_oclqry_base` (`frag_regs + 112`, `cmd_3d + 0xA8`, 64-bit) and `isp_oclqry_stride`
+   (`frag_regs + 80`, `cmd_3d + 0x88`):**
+   - **Condition:** `(cmd_3d.flags & 0x20) != 0` (bit 5, occlusion query enabled).
+   - **Register:** **`CR[0x0FC0/0x0FC4]`** (64-bit, per-core bank). On this single-core GPU,
+     write `isp_oclqry_base` directly to primary core `CR[0x0FC0]` (low) and `CR[0x0FC4]`
+     (high). On multicore, core *c* receives `isp_oclqry_base + c * isp_oclqry_stride`.
+   - **End of render:** no extra query-specific flush or write-back register is needed at
+     `3D finished`; the standard DM 3 completion cache flush (steps 1–9 above) makes the
+     occlusion counts visible to the host and subsequent GPU commands.
+2. **Fields not read by the 3D kick on BXE-2-32:**
+   `isp_zls_pixels` (`+84`), `isp_xtp_pipe_enable` (`+48`), `tpu` (`+56`), `pixel_phantom`
+   (`+64`), `fb_cdc_zls` (`+144`), `isp_dummy_stencil_store_base` (`+424`), and
+   `isp_dummy_depth_store_base` (`+432`) are **not** read by the firmware on this GPU.
 
 **Answers to the three Q14 questions:**
 
