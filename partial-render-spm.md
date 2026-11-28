@@ -121,12 +121,12 @@ stack pointer and the pages handed out for parameter-buffer data and for page ta
 correspond to the `Alloc Page Count` and `Alloc MMU Page Count` of the `Load`/`Store
 Freelist` lines (local freelist registers in [kick-geometry-ta](kick-geometry-ta.md), Q16b).
 
-**Not exercised in this run (`PENDING`):** on-demand ZS backing
-(`ZSBUFFER_BACKING`/`_UPDATE`; no `pr_buffer` was provided), and freelist reconstruction
-after HWR (no HWR occurred). The global freelist's registers (base and page counters, one
-bank per PM context: `0x20B8` geometry, `0x2078` fragment) are given in
-[kick-geometry-ta](kick-geometry-ta.md) (Q16e–Q16g), including the live stack pointers
-(global `0x20C8`/`0x2088`, local `0x0348`/`0x0350`).
+**Not exercised in this run (specified below and in [hardware-recovery](hardware-recovery.md)):**
+on-demand ZS backing (`ZSBUFFER_BACKING`/`_UPDATE`; see "On-demand ZS / MSAA buffer backing
+details" below), and freelist reconstruction after HWR (no HWR occurred). The global
+freelist's registers (base and page counters, one bank per PM context: `0x20B8` geometry,
+`0x2078` fragment) are given in [kick-geometry-ta](kick-geometry-ta.md) (Q16e–Q16g),
+including the live stack pointers (global `0x20C8`/`0x2088`, local `0x0348`/`0x0350`).
 
 ## Resuming geometry after OOM (answers Q28, D/O)
 

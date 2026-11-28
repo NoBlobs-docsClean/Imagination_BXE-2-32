@@ -90,9 +90,11 @@ How the mainline host expresses "the fragment must wait for its geometry" (**P**
   which carries a geometry kick and a fragment kick (`fill_cmd_kick_data` for each). For a
   partial-render fragment the host attaches no cleanup resources to the fragment half.
 
-`TO CONFIRM` (not established by the analysis): whether the firmware, in addition to this
-fence, holds the fragment kick on the HWRTData `state` while the geometry of the same
-HWRTData is running.
+**Confirmed (`D`):** the firmware does **not** hold the fragment kick on `hwrtdata.state`
+while the geometry of the same `HWRTData` is running; ordering between geometry and fragment
+is enforced solely by the `FENCE_PR` / `FENCE` cCCB UFO fences. The only `hwrtdata.state`
+check at fragment kick time is `hwrtdata.state == HWR (9)`, which discards the orphaned
+fragment command after an HWR (see [hardware-recovery](hardware-recovery.md)).
 
 The KCCB `FORCE_UPDATE` command forces checkpoints still `PVR_SYNC_CHECKPOINT_ACTIVE`
 (`0xAC1`) in a blocked fence to errored (`0xEFF`), unblocking it.

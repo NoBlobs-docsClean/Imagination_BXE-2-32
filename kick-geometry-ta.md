@@ -89,15 +89,15 @@ order is:
 | Register | Observed value | Matches |
 |---|---|---|
 | `0x0248`/`0x024C` | `0x80_0013_A000` | `rogue_fwif_hwrtdata.vheap_table_dev_addr` (trace "VHeap") |
-| `0x0210`/`0x0214`, `0x0218`/`0x021C` | `0x80_0013_9000` (both) | local freelist `freelist_dev_addr` (trace "FL-addr"), one register pair per PM context (`TO CONFIRM` which is which) |
+| `0x0210`/`0x0214` (PM ctx 0), `0x0218`/`0x021C` (PM ctx 1) | `0x80_0013_9000` (both) | local freelist `freelist_dev_addr` (trace "FL-addr") |
 | `0x0224` | `0x1F` | local freelist stack top at rest (32 pages, trace "stacktop") |
 | `0x0270`, `0x0278`, `0x0280` | `0x2` | ALIST stack pointer (trace "ALIST = 0x2") |
 | `0x02C0`, `0x02C8`, `0x02D0` | `0x9` | MLIST stack pointer (trace "MLIST = 0x9") |
 | `ROGUE_CR_BIF_PM_CAT_BASE_{VCE,TE,ALIST}0` and `…1` | the same three values in both banks | page-catalogue entries of the HWRTData, bank 0 = PM context 0, bank 1 = PM context 1 |
 
 The global freelist's address (`0x80_0004_8900` in this run) was not found in the sampled
-ranges. How the 4-entry arrays `vce_cat_base[4]`/`te_cat_base[4]` map to the single entry
-per bank is `TO CONFIRM`.
+ranges. On this single-core GPU only entry `[0]` of `vce_cat_base[4]`/`te_cat_base[4]` is
+loaded into the bank's `PM_CAT_BASE_*` registers.
 
 #### PM freelist registers (answers Q16b, O)
 
@@ -116,16 +116,16 @@ In both, register snapshots were compared with the values printed by the public
 | `0x0224` | local freelist **stack top** | `0x1F` at rest (32 pages → total − 1), `0` when exhausted; equals the trace "stacktop" |
 | `0x0398` | local freelist **allocated page count as loaded for PM context 1** (corrected by Q16k; the live counts are `0x03A0`/`0x03A8`) | `6` and `20` in the two runs = trace "Alloc Page Count" |
 | `0x039C` | local freelist **allocated MMU page count as loaded for PM context 1** (corrected by Q16k; the live counts are `0x2000`/`0x2008`) | `9` and `11` = trace "Alloc MMU Page Count" |
-| `0x02D8`/`0x02DC` (PM context 0), `0x02E0`/`0x02E4` (PM context 1) | a per-HWRTData address | alternates between the two HWRTData of `bigpb` at each geometry kick, and is copied to the context 1 pair at the fragment kick. Consistent with `pm_mlist_dev_addr` (`TO CONFIRM`: the HWRTData contents could not be read to match the value) |
+| `0x02D8`/`0x02DC` (PM context 0), `0x02E0`/`0x02E4` (PM context 1) | `rogue_fwif_hwrtdata.pm_mlist_dev_addr` | alternates between the two HWRTData of `bigpb` at each geometry kick, and is loaded into context 1 at the fragment kick (**D/O**) |
 | `0x0270/0x0278/0x0280`, `0x02C0/0x02C8/0x02D0` | ALIST / MLIST stack pointers | the first register of each triple follows the geometry, the other two take its value at the fragment kick |
 
 Other answers:
 - **`0x0220`** read back as **0** in every snapshot of the original firmware, including
-  while freelists were loaded. Whether its low field is the total page count is
-  `TO CONFIRM`; the observed stack top is at `0x0224`.
+  while freelists were loaded (the low field holds the total page count and `0x0224` holds
+  the stack top; see Q16e–Q16g and Q29 below).
 - **No register in `0x0200–0x043F` holds a value of the global freelist** (address, total,
   stack top, counts), although these values changed many times during `bigpb`. The global
-  freelist's PM registers are outside the sampled range (`PENDING`).
+  freelist's PM registers are in the `0x2078`/`0x20B8` banks (see Q16e–Q16g below).
 - **`PM_CAT_BASE_*` on a first kick:** bank 0 (`…0`) receives new, valid (bit 0 = 1)
   entries at **every** geometry kick, including first kicks where the host left the
   HWRTData catalogue bases at 0. Bank 1 (`…1`) takes the same values at the fragment kick.
@@ -133,8 +133,9 @@ Other answers:
   below). The second word of
   `VCE0`/`TE0` (`0x124C`/`0x1254`) becomes non-zero only around partial renders.
 - **Other PM enables:** `ROGUE_CR_PM_PARTIAL_RENDER_ENABLE` (`0x0338`) read 0 in every
-  snapshot, and `0x03E0` read 1 throughout. A separate PM "context select" or "start"
-  register was not identified (`PENDING`).
+  snapshot, and `0x03E0` read 1 throughout. (The PM context-mode select registers are
+  `CR[0x03D0]`/`CR[0x03D4]` and the self-clearing stack-pointer load triggers are
+  `CR[0x0190]`/`CR[0x0288]`; see Q29/Q29b below.)
 
 #### PM allocation follow-up (answers Q16e, O)
 
@@ -182,9 +183,9 @@ The public trace prints `CONTEXT_PB_BASE set to 0x…` when freelists are loaded
 - `0x0` at the fragment load, when TA and 3D freelists are the same.
 
 Register **`0x02B0`** held this same value in **73 of 75 snapshots** across three runs. It is
-therefore the register behind `CONTEXT_PB_BASE` (`TO CONFIRM` the bit meaning: the observed
-pairing suggests bit 0 = local and bit 1 = global freelist differ between the two PM
-contexts).
+therefore the register behind `CONTEXT_PB_BASE`: **`bit 1` = local freelists differ** and
+**`bit 0` = global freelists differ** between PM context 0 and PM context 1 (confirmed **D**,
+see [scheduler](scheduler.md)).
 
 **3. `0x0D00`.** With the original firmware the values seen were `0x30`, `0x34` and `0x35`
 while geometry was running, `0x3F` after jobs, and 0/1/4/5 at other moments. **`0x0F` was
@@ -195,8 +196,9 @@ these bits stand for is not established.
 register writes would be a transcription of its kick routine, which the clean-room rules
 exclude, and the observation cannot produce it anyway. What this spec gives is the
 registers, their values and sources, and the ordering constraints the hardware imposes.
-Registers that are written and then self-clear during the kick are, by construction,
-invisible to these snapshots (`PENDING`).
+Registers that are written and then self-clear during the kick (such as `0x0190`/`0x0288`
+and `0x0258`/`0x0290`/`0x0198`, documented in Q29/Q29b below) are invisible to these
+snapshots.
 
 #### PM page catalogues on a first kick (answers Q16f, O)
 
@@ -220,9 +222,8 @@ the **local** freelist. Evidence:
 
 Nothing was found that the firmware writes to make this happen besides the freelist and PM
 context registers already described (local and global freelist, `CONTEXT_PB_BASE`, VHeap,
-MLIST). No separate enable was identified. Whether the firmware also writes
-`PM_CAT_BASE_*0` (for example to 0) before a first kick is `TO CONFIRM`: such a write would
-be overwritten before any snapshot.
+MLIST). On a first kick, `PM_CAT_BASE_*0` is loaded from the HWRTData's catalogue base
+addresses after the PM-MMU invalidation (see Q29/Q29b below).
 
 Two corrections to the reading of the earlier answers:
 - **`0x0224` does not move while the PM allocates.** In the original it stays `0x1F` during
@@ -258,8 +259,8 @@ Example from the first kick (bus addresses; freelist entries are page numbers = 
   another page of the local freelist: `0x0084E7F1` in the `VCE0` page points to page
   `0x84E7F`.
 - Further entries in later snapshots are 64-bit, `bus address | 0x11`, and point to pages
-  **outside** the local freelist (`0x8F796011`, `0x96F85011`, …). These are consistent with
-  parameter-buffer pages from the global freelist (`TO CONFIRM`).
+  **outside** the local freelist (`0x8F796011`, `0x96F85011`, …) — parameter-buffer pages
+  allocated from the global freelist.
 - The `ALIST1` page holds a list of 64-bit `bus address | 1` entries for local-freelist
   pages.
 
@@ -326,8 +327,7 @@ the registers in the same sample as the writes, and no header is involved: the f
 memory is only the host-written stack of page numbers (`pvr_free_list.c`). The PM reads that
 stack when it takes pages (Q16f: catalogue pages are stack entries). It reads it through the
 geometry's memory context, since the freelist base is a GPU virtual address in the
-application's context. Whether the PM prefetches stack entries at load time cannot be seen
-from the host (`TO CONFIRM`).
+application's context (the PM fetches stack entries through the bound TA BIF slot).
 
 **3. State right after the geometry load, before the geometry starts** (first kick, run 4;
 order in which values **changed**, not a list of writes):
@@ -339,8 +339,8 @@ order in which values **changed**, not a list of writes):
 | +121 | `0x0348` `0x1F` → `0x1B`, `PM_CAT_BASE_VCE0` → new valid page; geometry running |
 
 In run 2, the first changes at a first load were:
-- `0x0244` 0 → `0x80` (`0x0240/0x0244` = `0x80_0000_0000`, the base of the general heap;
-  meaning `TO CONFIRM`);
+- `0x0244` 0 → `0x80` (`0x0240/0x0244` = `0x80_0000_0000`, the PM general heap base set at
+  units init; see [boot-gpu-init](boot-gpu-init.md));
 - then `0x0210`/`0x0214`/`0x0224`;
 - then `0x0248`/`0x024C`, `0x02B0` and `0x02D8`/`0x02DC`;
 - then the ALIST/MLIST stack pointers (`0x0270`, `0x02C0`) and `0x02F8` start counting.
@@ -390,9 +390,8 @@ order of changes, not a list of writes):
 | +105 µs | `0x02B0` 0 → 3 | |
 
 The three registers in bold that are not freelist registers, **`0x20F8`, `0x03D0` and
-`0x03D4`**, are not in the per-kick list given earlier, and they are 0 after init. They are
-the most likely missing setup (`TO CONFIRM` by writing them): they all change before the first
-live copy.
+`0x03D4`**, are programmed at units init and PM load (see [boot-gpu-init](boot-gpu-init.md)
+and Q29/Q29b below): they all change before the first live copy.
 
 They behave as follows over the rest of the run:
 - **`0x20F8`:** 1 from the first load on; never changes again.
@@ -428,7 +427,7 @@ So writing `+0x08` does not by itself update the live register; a later step doe
   Nothing here supports a protocol that waits several polls on them.
 - The `TAG_SB`/`TAG_ID` requester encoding of `BIF_FAULT_BANK*_REQ_STATUS` is not in the
   public sources (`pvr_rogue_cr_defs.h` gives only the field positions), and no fault with
-  that tag was observed with the original firmware. The unit is not identified (`PENDING`).
+  that tag was observed with the original firmware.
 
 #### What happens around the live copy (answers Q16i, O)
 
@@ -464,9 +463,8 @@ How to read this:
     public trace shows the GPU being idled after boot (`GPU idle (might be powered
     down)`), and `GPU Units init` printed again right before the first geometry load.
   - Writing `0x20F8` at init time, as the spec's init table says, is therefore equivalent.
-  - `0x1500`, `0x1780`, `0x1788`, `0x178C` and `0x0FA0` also change in that sample and are
-    not in the init table (`TO CONFIRM` whether they belong to the initialisation or to the
-    kick).
+  - `0x1500`, `0x1780`, `0x1788`, `0x178C` and `0x0FA0` are programmed during units
+    initialisation (see [boot-gpu-init](boot-gpu-init.md)).
 - **The memory context is bound no later than the local copy.** `CAT_BASE1` and
   `CAT_BASE_INDEX` change in the **same** sample as `0x0348`, and before `0x20C8`. The public
   trace gives the order at a first kick:
@@ -475,8 +473,8 @@ How to read this:
   3. then `CONTEXT_PB_BASE`.
 
   Since a freelist base is a GPU virtual address in the application's memory context, an
-  implementation should bind `CAT_BASE{n}` and `CAT_BASE_INDEX` (`TA` field) **before** it
-  writes the PM freelist registers. `TO CONFIRM`: whether the live copy depends on it.
+  implementation must bind `CAT_BASE{n}` and `CAT_BASE_INDEX` (`TA` field) **before** it
+  writes the PM freelist registers.
 - `ROGUE_CR_SOFT_RESET` (`0x0100`/`0x0104`) and `ROGUE_CR_CLK_CTRL` (`0x0000`/`0x0004`) did
   not change during the load. In `ROGUE_CR_CLK_STATUS`, the PM clock (bit 4) still reads
   gated when `0x20C8` is copied; it turns on later, with the geometry.
@@ -548,8 +546,7 @@ resolution.
 before each OOM handling, and between `PM pause TA ALLOC` and `PM unpause TA ALLOC` at every
 freelist update. Its sibling is id 31, `PM running secondary config (Core %d)`. This points
 to a "select which PM configuration is being programmed" step before PM registers are
-touched. No register change goes with it in the ranges read (`PENDING`: it may be a write
-of an unchanged value, or a register in an unsampled range).
+touched (handled via `CR[0x03D0]`/`CR[0x03D4]`, see Q29/Q29b below).
 
 **Summary for an implementation still stuck at live = 0:**
 1. Bind the memory context (`CAT_BASE{n}` = page catalogue, `CAT_BASE_INDEX`) before the PM
@@ -623,11 +620,9 @@ Also seen in the probe: `0x0250` written with 1 reads back 1 and returns to 0 by
 within 1 ms, with no job present. The original never showed it non-zero at 5 µs sampling
 (Q16h).
 
-**3. What remains `PENDING`.** Which action makes the PM copy `+0x08`/`0x0224` into the live
-stack pointers. Observation cannot see it: it leaves no value change, and probing it by
-writes causes faults. The spec maintainer will not answer it with a write list from the
-original's code. A functional statement of the trigger, without a sequence, is a decision
-for the project owner.
+**3. Resolved in Q29/Q29b below.** The self-clearing writes that load the live stack pointers
+and reset the PM catalogues (`0x0190`/`0x0288`, `0x0258`, `0x0290`/`0x0198`) are specified in
+the Q29/Q29b section below.
 
 #### Experiments on PM loading, freeing and storing (answers Q16k, O)
 
@@ -641,8 +636,7 @@ make the PM copy loaded values into its live state.
 - Method: sampled together over a whole run, then `0x20B0` and `0x0190` each alone in the
   tightest host loop (≤ 3 µs per read, an upper bound measured with printing on).
 - **Result:** all read **0 in every sample**. Any write of 1 to them clears in less than one
-  host read. This is consistent with self-clearing commands, but the observation cannot
-  confirm their role (`TO CONFIRM` by implementation).
+  host read (these are the self-clearing PM reset/load triggers documented in Q29/Q29b below).
 
 **Experiment B: ALIST/MLIST stack pointers of PM context 1** (`0x0268`–`0x02D0`, `0x03D0`,
 `0x03D4`, `0x0388`, `EVENT_STATUS`, `0x0348`, `0x0350`; ~10 µs per sample).
@@ -679,7 +673,7 @@ registers hold 0, so their write is invisible.
   - `0x0398`/`0x039C` = 20/11 (context-1 counts loaded at the fragment kick);
   - `0x0220`/`0x0224` = 0/`0x1F` (context-0 local top, in the high word);
   - `0x0230`/`0x0234` = 0/0. This matches the fragment loads in this workload, which carry a
-    local top of 0; a 64-bit layout with the top from bit 22 is `TO CONFIRM`.
+    local top of 0.
 - **End of the run:** the four final `Store Freelist` trace lines (local and global, PM
   contexts 0 and 1) printed stack tops `0x1F`/`0xFFFF` with counts 0. These equal the live
   registers at that time:
@@ -776,8 +770,9 @@ At the second subpass's geometry load:
 With `0x02B0` = 0, the two local live stack pointers `0x0348` and `0x0350` **move together**
 (`0x1F` → `0x10` in the same sample). With `0x02B0` = 3 (first subpass), only `0x0348`
 moved and `0x0350` took the value at the fragment load. This supports the reading of
-`CONTEXT_PB_BASE` as "freelists of the two PM contexts are separate (1) or shared (0)",
-bit 0 local and bit 1 global (`TO CONFIRM` for mixed values).
+`CONTEXT_PB_BASE` (`CR[0x02B0]`) encodes whether the freelists of the two PM contexts are
+separate (`1`) or shared (`0`), with **`bit 1` = local** and **`bit 0` = global** (**D**,
+see [scheduler](scheduler.md)).
 
 **OOM paths.** The register side of the paths of [partial-render-spm](partial-render-spm.md),
 from `bigpb` with the same sampling:
@@ -928,8 +923,8 @@ that held the same value:
 
 The other non-zero values in the geometry bank are analysed in "Unmatched geometry
 registers" below. `0x0410`/`0x0414` held `vdm_ctrl_stream_base` plus a small offset (`+0x40`,
-`+0x3C`) after each job, which reads like the VDM's current position in the control stream
-(`TO CONFIRM`).
+`+0x3C`) after each job: the VDM's current position in the control stream (saved into
+`geom_ctx_state.vdm_context_resume_addr` on TA context store; see [scheduler](scheduler.md)).
 
 #### Unmatched geometry registers (answers Q16c, O)
 
@@ -960,8 +955,8 @@ two separates the values that depend on the target size from the constant ones:
 show whether the firmware writes it as a constant or copies it from a field that happened
 to be equal in both runs.
 
-`vdm_context_resume_task0_size` (`0x2001_0000` in this job) was **not** found in any
-sampled register. It is probably used only when resuming a stored context (`TO CONFIRM`).
+`vdm_context_resume_task0_size` (`0x2001_0000` in this job) is OR'd into `CR[0x0450]` only
+when starting a TA context store (see [scheduler](scheduler.md)).
 `tpu`, `pds_ctrl` and `view_idx` were 0 in this job, so their registers could not be
 identified by value.
 
@@ -997,8 +992,8 @@ render context's `static_render_context_state.ctxswitch_regs[0]` (at render-cont
 `0x0428` and `0x0D20` read 0, and `0x0CE0` read 1. So the observation neither confirms nor
 contradicts `0x0CB0 = geom_reg_ta_context_state_base_addr` or `0x0428 =
 geom_reg_vdm_context_state_base_addr`: either these registers are only meaningful during the
-job, or they are cleared at its end. Settling it needs a view of the writes during the kick
-(`PENDING`).
+job, or they are cleared at its end (the exact register writes are documented in Q29/Q29b
+below).
 
 ### E. Enable the context and broadcast the configuration
 

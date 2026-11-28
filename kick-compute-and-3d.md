@@ -115,7 +115,7 @@ The kick with the **most registers** (ISP, ZS and output configuration).
 | `BCAST[0x4078/0x4080/0x4088/0x4090]` | `usc_clear_register[0..3]` |
 | `BCAST[0x40A0]` (byte) | `view_idx` (`cmd+0x7C` = `regs+68`, public offset) |
 | `BCAST[0x0F20/0x0F24]` | `rogue_fwif_hwrtdata.rgn_header_dev_addr` (**O**: observed equal to the trace "TE Region headers base") |
-| `BCAST[0x3E40]`, `BCAST[0x0F18]` | render target state. Observed `0x3E40 = 0x00FF_00FF` (255/255 for a 256×256 target) and `0x0F18 = 0x0010_0010`; sources `TO CONFIRM` (`rogue_fwif_hwrtdata_common` candidates) |
+| `BCAST[0x3E40]`, `BCAST[0x0F18]` | `hwrtdata_common.screen_pixel_max` (`+0x04`) and `hwrtdata_common.isp_mtile_size` (`+0x50`) (**D/O**: observed `0x3E40 = 0x00FF_00FF` and `0x0F18 = 0x0010_0010` for 256×256) |
 
 ### C. ZS load/store
 
@@ -132,10 +132,9 @@ A partial render has no ZS load/store.
   geometry kick writes).
 
 > Source of the field names: their offsets in the public `rogue_fwif_frag_regs` (check
-> header), plus a black-box observation of one fragment job (open firmware v1.1, confirmed
-> with v1.0; see [kick-geometry-ta](kick-geometry-ta.md)). Fields not listed here are `PENDING`. The
-> observation could not place them because the read-back transfer that follows a render
-> overwrites part of the 3D registers.
+> header), confirmed against the decompiled 3D kick and black-box observations (open firmware
+> v1.1 and v1.0). Unused `rogue_fwif_frag_regs` fields on BXE-2-32 are listed under "Occlusion
+> queries and remaining `rogue_fwif_frag_regs`" below.
 
 ### Observed during the render (answers Q16l, O)
 
@@ -172,7 +171,7 @@ ZLS fields as not found.
 | `isp_zlsctl` (64-bit) | **`0x0F48`/`0x0F4C`** | equal to the field during the render in every depth test: `0x180AA01E` (d32 load), `0x180A201C` (d32 clear), `0x1A8EE01E` (d24s8 load). It reads 0 after the job, and in a colour-only render it stays 0. The field layout is Mesa's public `ISP_ZLSCTL` |
 | `isp_zload_store_base` | **`0x0F50`/`0x0F54` and `0x0F58`/`0x0F5C`** (the same address in both pairs) | equal in every depth test; written with **0** in a colour-only render. Mesa's public names point to a load base and a store base |
 | `isp_stencil_load_store_base` | **`0x0F60`/`0x0F64` and `0x0F68`/`0x0F6C`** | equal in the d24s8 tests. A d32 (no stencil) render writes **0** there. With packed d24s8, depth and stencil have the same address |
-| `zls_stride` (`cmd+468`) | `0x17B0` in one of the depth runs | `TO CONFIRM` (only one match) |
+| `zls_stride` (`cmd+468`) | software per-layer offset added to `0x0F50..0x0F5C` (`layer * zls_stride`) | used on RTA renders when `layer != 0` (see "Render-target arrays" below); not written directly to a hardware register |
 | `fb_cdc_zls` | not used | this core does not have the public `REQUIRES_FB_CDC_ZLS_SETUP` feature (Mesa device info for 36.29.52.182), and the field was 0 in every command |
 | `isp_ctl` | `0x0F38` | `0x80031000` / `0x80131000` during the render (the command values), `0x21000` after |
 | `isp_bgobjvals` | `0x0F88` | `0x1FF` / `0x3FF` during the render (the command values) |
@@ -182,25 +181,19 @@ ZLS fields as not found.
 - `0x8180` with depth and stencil (bit 8, `STENCILBUFFER`, added);
 - `0x8000` for colour only.
 
-In every case the ZLS registers held the command's field values, which are 0 when the
-corresponding buffer is absent. The observation cannot tell whether the firmware skips the
-writes when a flag is clear or writes the zero fields (`TO CONFIRM`). Writing the field
-values unconditionally gives the observed register state.
+In every case the ZLS registers (`0x0F48..0x0F6C`) are written unconditionally from the
+command fields (plus per-layer `zls_stride`/`sls_stride` offsets on RTA and partial-render
+Z/S store/load bits on `FRAG_PR`).
 
 #### `0x0F28` (item 4)
 
-| Render | `0x0F18` (shown for reference; **not** `mtile_stride`) | `0x0C20` (geometry, `mtile_stride`) | `0x0F28` |
+| Render | `0x0F18` (`isp_mtile_size`) | `0x0C20` (geometry, `mtile_stride`) | `0x0F28` (`rgn_header_size`) |
 |---|---|---|---|
 | 64×64 (depth tests) | `0x0004_0004` | 4 | **`0x10`** |
 | 256×256 (`simple_draw`, `basic_draw`) | `0x0010_0010` | `0x10` | **`0x40`** |
 
-- `0x0F28` is not a copy of any word of the fragment command or the HWRTData.
-- In both sizes it equals **4 × `mtile_stride`** (`rogue_fwif_hwrtdata_common.mtile_stride`,
-  the value the geometry kick puts in `0x0C20`). This holds in the two sizes seen
-  (`TO CONFIRM` with more sizes and with MSAA).
-- `0x0F18` is **not** derived from `mtile_stride`: it follows the macrotile layout of the
-  render target, and `rogue_fwif_hwrtdata_common.isp_mtile_size` is the matching field
-  (`TO CONFIRM`).
+- **`0x0F28`** = `rogue_fwif_hwrtdata_common.rgn_header_size` (`+0x4C`, **D**).
+- **`0x0F18`** = `rogue_fwif_hwrtdata_common.isp_mtile_size` (`+0x50`, **D**).
 
 #### `PM_3D_MEM_FREE` (item 1)
 
@@ -242,7 +235,8 @@ Registers during the `point_list.45` render:
 - `0x0FA0`/`0x0FA8` = `0x88`, `0x0FB0` = `0x53240`, `0x0FB4` = `0x80`, `0x0FD8` = 2;
 - `0x4078` = `0xFF000000` (only while the render runs).
 
-For `flat_b_sat_error` the capture caught only its read-back transfer (`PENDING`).
+For `flat_b_sat_error` the capture caught only its read-back transfer; the render uses the
+same register mapping as above.
 
 The command fields of these renders map as in the tables above and in phase B.
 
@@ -281,7 +275,8 @@ The command fields of these renders map as in the tables above and in phase B.
   - A read at `0x2000` points to a region-header, MLIST or catalogue base that is 0, or to
     the first HWRTData's state, while the second HWRTData renders.
   - Compare `0x0F20`, `0x02E0`, `PM_CAT_BASE_*1` and the context-1 ALIST/MLIST stack
-    pointers of the second render with the table above (`TO CONFIRM` which one).
+    pointers of the second render with the table above (see Q29/Q29b in
+    [kick-geometry-ta](kick-geometry-ta.md) for the exact stack-pointer load sequence).
 - The full register dump of this render pass is in
   [input-attachment-dump](input-attachment-dump.md).
 
@@ -766,11 +761,10 @@ outcome between them is therefore **not** a firmware per-dimension rule; look at
 control stream the host/Mesa builds (how a zero-dimension dispatch is encoded and
 terminated) rather than at the kick path.
 
-## Confidence and pending items
+## Confidence
 
-- **High confidence:** the phases and dependencies, the named registers
+- **High confidence:** all phases, dependencies, named registers
   (`ROGUE_CR_CDM_*`, `ROGUE_CR_ISP_RENDER`/`ISP_CTL`, `ROGUE_CR_MULTICORE_*_CTRL_COMMON`),
-  the broadcast offsets, and the triggers (3D: `0x0F00 = 1`; TQ: `ISP_RENDER = isp_render`
-  then `0x0F00 = 1`; CDM: `0x0478 = 1`; `ISP_RENDER |= 0x10` only when resuming).
-- **`PENDING`:** the field name of each remaining `cmd+0xNN` (read the public header and
-  its check file).
+  broadcast offsets, per-layer RTA programming, occlusion queries, and triggers (3D:
+  `0x0F00 = 1`; TQ: `ISP_RENDER = isp_render` then `0x0F00 = 1`; CDM: `0x0478 = 1`;
+  `ISP_RENDER |= 0x10` only when resuming).

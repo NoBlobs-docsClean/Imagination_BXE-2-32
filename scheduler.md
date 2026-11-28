@@ -157,9 +157,6 @@ store/resume trace events and no recovery. The registers were sampled every ~10 
   3. `0x0F08` returns to 0 at the next fragment load.
 - `0x0298` and `0x01C8` read 0 throughout.
 
-The meaning of the `0x1020` value (a resume position, by its growth from one resume to the
-next) is `TO CONFIRM`. The contents of the saved state buffer were not read.
-
 **3D context store and resume register protocol (answers Q40, D):**
 
 1. **Telling a store from a normal end at `PIXELBE_END_RENDER`:**
@@ -208,8 +205,61 @@ next) is `TO CONFIRM`. The contents of the saved state buffer were not read.
      - release DM 3 running context, schedule the waiting higher-priority DM 3 context, and
        deactivate the BIF memory context.
 
-`PENDING`: the TA/CDM store and resume sequences and the layout of the geometry context-state
-buffer (buffer A/B selection with `ROGUE_FWIF_CTX_USING_BUFFER_A/B`).
+**TA (geometry / DM 2) context store and resume register protocol (D):**
+
+1. **Store request:** only when `(dm_queue[2].flags & 1) != 0` and no store is already pending.
+   Using the current buffer selector `buf = geom_ctx_state.using_buffer` (`u16` at `+0x20`,
+   `0` = A, `1` = B) and the context's geometry state block:
+   - `CR[0x0428/0x042C]` = `vdm_context_state_base_addr`;
+   - `CR[0x0CC0/0x0CC4]` = `ta_context_state_base_addr`;
+   - from buffer `buf`'s store task descriptors: `CR[0x0438/0x043C]` (`task0`), `CR[0x0440]`
+     (`task1`), `CR[0x0448/0x044C]` (`task2`), `CR[0x0450/0x0454]` (`task0_size |
+     cmd_ta.vdm_context_store_task0_size_override`), `CR[0x0458]` (`task1_size`),
+     `CR[0x0460/0x0464]` (`task2_size`);
+   - trigger store: **`CR[0x0468] = 1`** (`VDM_CONTEXT_STORE_START`).
+2. **Store completion (at `TA_FINISHED` when store was requested):**
+   - Clear the store-requested flag and poll **`CR[0x0430]`** (`VDM_CONTEXT_STORE_STATUS`)
+     until **`(val & 1) == 1`**.
+   - Check **`(CR[0x0430] & 2) != 0`** (bit 1 = `NEED_RESUME`):
+     - if `0` (store request arrived too late, TA finished normally): clear
+       `hwrtdata.flags &= ~0x400` and continue normal TA completion;
+     - if `1` (stored): save **`CR[0x0418/0x041C]`** (64-bit VDM resume pointer) into
+       `geom_ctx_state.vdm_context_resume_addr` (`+0x00/+0x04`), set
+       **`hwrtdata.flags |= 0x400`**, still run VHeap store (`CR[0x0260] = 1`), TPC flush
+       (`CR[0x0C50] = 0x40000000`), RTC flush (`CR[0x0CB8] = 2`), and DM 2 cache flush, and
+       do **not** retire the `GEOM` command.
+3. **TA resume (in the geometry kick when `hwrtdata.flags & 0x400` is set):**
+   - Write **`BCAST[0x0408/0x040C] = vdm_context_state_base_addr`** (instead of
+     `cmd_ta.vdm_ctrl_stream_base`);
+   - flip the A/B buffer selector: **`geom_ctx_state.using_buffer ^= 1`** (`1 - cur`);
+   - write **`CR[0x0418/0x041C] = geom_ctx_state.vdm_context_resume_addr`**;
+   - trigger TA as usual (`CR[0x0400] = 1`).
+
+**CDM (compute / DM 4) context store and resume register protocol (D):**
+
+1. **Store request:** only when `(dm_queue[4].flags & 1) != 0` and no store is already pending:
+   write **`BCAST[0x0488] = 1`** (`CDM_CONTEXT_STORE_START`).
+2. **Store completion (at `COMPUTE_FINISHED` when store was requested):**
+   - Clear `BCAST[EVENT_CLEAR] = 4`, clear the store-requested flag, and poll **`CR[0x04A0]`**
+     (`CDM_CONTEXT_STORE_STATUS`) until **`(val & 1) == 1`**.
+   - For each core *c* (`c = 0` on BXE-2-32): if **`(CR[0x04A0 + c * 0x80000] & 2) != 0`**,
+     set `stored_core_mask |= (1 << c)`.
+   - If `stored_core_mask == 0` (finished normally): clear `fw_com_ctx_flags &= ~0xFF`, flush
+     DM 4 caches, and retire the command normally.
+   - If `stored_core_mask != 0` (stored): set
+     `fw_com_ctx_flags = (fw_com_ctx_flags & ~0xFF) | stored_core_mask`, flush DM 4 caches,
+     do **not** retire the `CDM` command, release DM 4, schedule the next context, and
+     deactivate the BIF memory context.
+3. **CDM resume (in the compute kick when `(fw_com_ctx_flags & 0xFF) != 0`):**
+   - Program the standard CDM base registers (`BCAST[0x0480/0x0484]`, `BCAST[0x17A8/0x17AC]`,
+     `BCAST[0x0498/0x049C]`).
+   - Select buffer A (`0`) or B (`1`) from the context-state buffer flag (`& 1`), and for each
+     core *c* with bit *c* set in `fw_com_ctx_flags` (`c = 0` on BXE-2-32):
+     - **`CR[0x04D8/0x04DC + c * 0x80000]`** = selected A/B resume state buffer address;
+     - **`CR[0x04E0 + c * 0x80000]`** = `cmd_cdm.cdm_resume_pds1` (`cmd + 0x64`).
+   - Invalidate MMU caches (`BIF_CTRL_INVAL = 0x1C`).
+   - Trigger **resume** (instead of `BCAST[0x0478] = 1`): write **`CR[0x0490 + c * 0x80000] = 1`**
+     (`CDM_CONTEXT_RESUME_START`, `CR[0x0490] = 1` on BXE-2-32).
 
 ## Inter-DM overlap rules
 
