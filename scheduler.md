@@ -205,19 +205,29 @@ store/resume trace events and no recovery. The registers were sampled every ~10 
      - release DM 3 running context, schedule the waiting higher-priority DM 3 context, and
        deactivate the BIF memory context.
 
-**TA (geometry / DM 2) context store and resume register protocol (D):**
+**TA (geometry / DM 2) context store and resume register protocol (answers Q43, D):**
 
 1. **Store request:** only when `(dm_queue[2].flags & 1) != 0` and no store is already pending.
-   Using the current buffer selector `buf = geom_ctx_state.using_buffer` (`u16` at `+0x20`,
-   `0` = A, `1` = B) and the context's geometry state block:
-   - `CR[0x0428/0x042C]` = `vdm_context_state_base_addr`;
-   - `CR[0x0CC0/0x0CC4]` = `ta_context_state_base_addr`;
-   - from buffer `buf`'s store task descriptors: `CR[0x0438/0x043C]` (`task0`), `CR[0x0440]`
-     (`task1`), `CR[0x0448/0x044C]` (`task2`), `CR[0x0450/0x0454]` (`task0_size |
-     cmd_ta.vdm_context_store_task0_size_override`), `CR[0x0458]` (`task1_size`),
-     `CR[0x0460/0x0464]` (`task2_size`);
+   All base addresses and task descriptors come from the render context's
+   `static_render_context_state.ctxswitch_regs[0]` (`struct rogue_fwif_geom_registers_caswitch`
+   at render context `+0x130` for DM 2; `+0x1E8` for secondary DM 6), indexed by
+   `buf = geom_ctx_state.using_buffer` (`u16` at `+0x20`, `0` = A, `1` = B):
+   - `CR[0x0428/0x042C]` (64-bit) = `geom_reg_vdm_context_state_base_addr` (`+0`);
+   - `CR[0x0CC0/0x0CC4]` (64-bit) = `geom_reg_ta_context_state_base_addr` (`+16`);
+   - `CR[0x0438/0x043C]` (64-bit) = `geom_state[buf].geom_reg_vdm_context_store_task0` (`+24`);
+   - `CR[0x0440]` (32-bit, low word) = `geom_state[buf].geom_reg_vdm_context_store_task1` (`+32`);
+   - `CR[0x0448/0x044C]` (64-bit) = `geom_state[buf].geom_reg_vdm_context_store_task2` (`+40`);
+   - `CR[0x0450/0x0454]` (64-bit) = `geom_state[buf].geom_reg_vdm_context_resume_task0` (`+48`),
+     with its **low 32 bits OR'd with `cmd_geom.regs.vdm_context_resume_task0_size`** (at
+     `cmd_geom` `+0x38`, or `+0x60` from the 40-byte cCCB command header);
+   - `CR[0x0458]` (32-bit, low word) = `geom_state[buf].geom_reg_vdm_context_resume_task1` (`+56`);
+   - `CR[0x0460/0x0464]` (64-bit) = `geom_state[buf].geom_reg_vdm_context_resume_task2` (`+64`);
+   - (`geom_reg_vdm_context_store_task3..4` and `resume_task3..4` are **not** written on
+     BXE-2-32 — they are only used when `VDM_OBJECT_LEVEL_LLS` is present.)
    - trigger store: **`CR[0x0468] = 1`** (`VDM_CONTEXT_STORE_START`).
-2. **Store completion (at `TA_FINISHED` when store was requested):**
+2. **Store completion:** signalled by **`TA_FINISHED` (`EVENT_STATUS` bit 5, `0x20`)** — the
+   same event as a normal TA completion (not `TA_TERMINATE` / OOM). When `TA_FINISHED` arrives
+   with a store pending:
    - Clear the store-requested flag and poll **`CR[0x0430]`** (`VDM_CONTEXT_STORE_STATUS`)
      until **`(val & 1) == 1`**.
    - Check **`(CR[0x0430] & 2) != 0`** (bit 1 = `NEED_RESUME`):
@@ -229,8 +239,8 @@ store/resume trace events and no recovery. The registers were sampled every ~10 
        (`CR[0x0C50] = 0x40000000`), RTC flush (`CR[0x0CB8] = 2`), and DM 2 cache flush, and
        do **not** retire the `GEOM` command.
 3. **TA resume (in the geometry kick when `hwrtdata.flags & 0x400` is set):**
-   - Write **`BCAST[0x0408/0x040C] = vdm_context_state_base_addr`** (instead of
-     `cmd_ta.vdm_ctrl_stream_base`);
+   - Write **`BCAST[0x0408/0x040C] = ctxswitch_regs[0].geom_reg_vdm_context_state_base_addr`**
+     (instead of `cmd_geom.regs.vdm_ctrl_stream_base`);
    - flip the A/B buffer selector: **`geom_ctx_state.using_buffer ^= 1`** (`1 - cur`);
    - write **`CR[0x0418/0x041C] = geom_ctx_state.vdm_context_resume_addr`**;
    - trigger TA as usual (`CR[0x0400] = 1`).
