@@ -160,10 +160,56 @@ store/resume trace events and no recovery. The registers were sampled every ~10 
 The meaning of the `0x1020` value (a resume position, by its growth from one resume to the
 next) is `TO CONFIRM`. The contents of the saved state buffer were not read.
 
-`PENDING`: the register-level store and resume sequences per DM, and the layout of the data
-written into the context-state buffers (buffer A/B selection with
-`ROGUE_FWIF_CTX_USING_BUFFER_A/B`). The observation shows the protocol, not the register
-writes.
+**3D context store and resume register protocol (answers Q40, D):**
+
+1. **Telling a store from a normal end at `PIXELBE_END_RENDER`:**
+   - When `PIXELBE_END_RENDER` fires and a store had been requested (`BCAST[0x1000] = 1`,
+     only issued while `(CR[ROGUE_CR_ISP_RENDER] & 3) != 3` and not in `PR running`), clear
+     the store-requested flag and clear the low byte of `fw_com_ctx_flags` (`&= ~0xFF`).
+   - Read **`CR[0x0130]`** (`EVENT_STATUS`) and **`CR[0x1038]`** (ISP context-switch status)
+     for each core *c* (`c = 0` on single-core BXE-2-32):
+     - **Stored** iff **`(CR[0x0130] & 0x8) != 0` AND `(CR[0x1038] & 1) == 0`**.
+     - **Finished normally (store request arrived too late)** iff **`(CR[0x1038] & 1) == 1`**:
+       zero `frag_ctx_state.frag_reg_pm_deallocated_mask_status` (`+0x00`) and
+       `frag_reg_dm_pds_mtilefree_status` (`+0x04`), and proceed with normal completion.
+2. **State saved into `rogue_fwif_frag_ctx_state` on store:**
+   - For each core *c* (`1` entry on single-core BXE-2-32):
+     **`frag_ctx_state.frag_reg_isp_store[c]`** (`+0x0C + 4*c`) = **`CR[0x1008 + c * 0x80000]`**
+     (`CR[0x1008]` on BXE-2-32).
+   - Poll **`CR[0x03F8]`** until **`(val & 0xC2) == 0xC2`** (PM 3D store idle handshake; on
+     timeout, clear `BCAST[EVENT_CLEAR] = 0x4108` and flush).
+   - **`frag_ctx_state.frag_reg_pm_deallocated_mask_status`** (`+0x00`) = **`CR[0x0360]`**.
+   - **`frag_ctx_state.frag_reg_dm_pds_mtilefree_status`** (`+0x04`) = **`CR[0x0370]`**.
+   - Set `fw_com_ctx_flags |= stored_core_mask` (bit `0` = `NEED_RESUME` on BXE-2-32) and
+     emit trace `CSW_7` (`"3D FWCtx 0x%08.8x needs resume"`).
+3. **Resume writes in the 3D kick (after phases B–D, `BCAST[0x03D8]`, `CR[0x03E0]`, `CR[0x01C0]`,
+   and before `BCAST[0x0F00] = 1`):**
+   - **Normal kick** (`(fw_com_ctx_flags & 0xFF) == 0`): write `CR[0x0298] = 0` and
+     `CR[0x01C8] = 0`.
+   - **Resume kick** (`(fw_com_ctx_flags & 0xFF) != 0`):
+     - for each core *c* with bit *c* set in `fw_com_ctx_flags`: write
+       **`CR[0x1020 + c * 0x80000] = frag_ctx_state.frag_reg_isp_store[c]`** (single register
+       `CR[0x1020]` on BXE-2-32);
+     - **`BCAST[ROGUE_CR_ISP_RENDER] = CR[ROGUE_CR_ISP_RENDER] | 0x10`** (bit 4 = resume);
+     - **`CR[0x0298] = frag_ctx_state.frag_reg_pm_deallocated_mask_status`** (`+0x00`);
+     - **`CR[0x01C8] = frag_ctx_state.frag_reg_dm_pds_mtilefree_status`** (`+0x04`).
+   - `fw_com_ctx_flags & 0xFF` is cleared at the next `3D finished` (before checking whether a
+     new store happened) or immediately after `BCAST[0x0F00] = 1`.
+4. **Completion of a stored render:**
+   - **Skipped:** wait for `PM_3D_MEM_FREE` (`0x0130 & 0x100`), PM 3D timeout disable/restore,
+     RTA layer advance/re-kick, command retire (`read_offset` remains on the same `FRAG`
+     command so it is resumed later), and UFO updates.
+   - **Still executed:**
+     - `hwrtdata.state` (`+0xAC`): transitions `4` (`FINALRENDER`) → **`6`** (`3DCONTEXTSTORED`,
+       not `3`), followed by the 3-step PM-MMU invalidation (`SLC 0x10`, `BIF_CTRL_INVAL 4`,
+       `0x1348`) unless on a non-last RTA layer;
+     - `BCAST[EVENT_CLEAR] = 0x8` (or `0x4008` if ZLS store);
+     - full **DM 3 cache flush**;
+     - release DM 3 running context, schedule the waiting higher-priority DM 3 context, and
+       deactivate the BIF memory context.
+
+`PENDING`: the TA/CDM store and resume sequences and the layout of the geometry context-state
+buffer (buffer A/B selection with `ROGUE_FWIF_CTX_USING_BUFFER_A/B`).
 
 ## Inter-DM overlap rules
 

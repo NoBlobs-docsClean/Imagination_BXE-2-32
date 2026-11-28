@@ -177,3 +177,34 @@ HWR and power management share state:
 - the power teardown walks the same BIF slot state that HWR resets (see
   [power-management](power-management.md)). Both paths must leave that state consistent;
 - a power transition must not start while a recovery is in progress.
+
+## Discarded geometry and subsequent 3D commands (answers Q42, D)
+
+1. **Discard check on `hwrtdata.state == HWR (9)` before kicking 3D (or non-first TA):**
+   at the very start of PM `HWRTData` loading (`load_hwrtdata(hwrtdata, new_state, ...)`),
+   **before** touching any PM register:
+   ```text
+   if (new_state != HWRTDATA_STATE_KICKTAFIRST (2) &&
+       hwrtdata.state == HWRTDATA_STATE_HWR (9))
+       return DISCARD;
+   ```
+   - When a queued `FRAG` (`new_state == 4`) or non-first `GEOM` (`new_state == 3`) sees
+     `hwrtdata.state == 9 (HWR)` (set by the host's freelist-reconstruction handler for every
+     `HWRTData` using a reconstructed freelist — which is why holding DM 2/3 until
+     `FREELISTS_RECONSTRUCTION_UPDATE` is required), the kick **must not touch the GPU**: it
+     deactivates the BIF memory context, clears `fw_com_ctx_flags &= ~0xFF`, logs
+     `HWR_DM_DISCARDED` (`Discarded cmd on DM3 (reason=1)`), and returns `DISCARD` so the
+     dispatcher **retires the command and updates its UFOs/fences**.
+   - On the next frame's `FIRSTKICK` (`new_state == 2`), `new_state == 2` bypasses the `== 9`
+     check, transitions `hwrtdata.state` from `9 → 2`, and subsequent frames run cleanly
+     without a second fault.
+2. **Clearing `HWRTDATA_HAS_LAST_GEOM` when HWR retires a DM 2 command:**
+   when HWR retires a running DM 2 geometry command during recovery, it clears bit 10 of
+   `hwrtdata.flags` (`hwrtdata.flags &= ~0x400`); on DM 3 it clears bit 0 of
+   `fw_com_ctx_flags` (`&= ~1`).
+3. **Innocent / waiting DM 2 context during a DM 3 HWR:**
+   at reset time, **every** DM with a running context (`running_ctx != NULL`) — except DM 3
+   aborted mid-partial-render (`PR running`, which clears `running_ctx` without retiring the
+   final 3D command) — is marked `NEEDS_SKIP` and **retired (discarded)** during recovery,
+   **not** retried. Discarding the waiting DM 2 geometry is therefore normal; the follow-up 3D
+   fault occurs only if the `hwrtdata.state == 9 (HWR)` discard check above is missing.

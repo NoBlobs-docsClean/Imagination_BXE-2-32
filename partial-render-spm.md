@@ -292,3 +292,38 @@ After a hardware recovery that corrupted freelists, the firmware sends FWCCB
   `ROGUE_FWIF_KCCB_RTN_SLOT_CMD_EXECUTED` alone when the freelist was cleaned, and
   `CMD_EXECUTED | ROGUE_FWIF_KCCB_RTN_SLOT_CLEANUP_BUSY` when it is still in use. Reporting
   "busy" wrongly makes the host retry and give up, leaving the freelist stuck.
+
+## On-demand ZS / MSAA buffer backing details (answers Q41, D)
+
+`rogue_fwif_prbuffer` fields used by the firmware: `buffer_id` (`+0x00`), `on_demand`
+(`+0x04`), `state` (`+0x08`: `0 = UNBACKED`, `1 = BACKED`, `2 = BACKING_PENDING`,
+`3 = UNBACKING_PENDING`), `submitted` (`+0x10`), and `executed` (`+0x14`).
+
+1. **When buffers are unbacked:** **only on `KCCB_CLEANUP_ZSBUFFER`**, **not** at the end of
+   a normal 3D render. When `CLEANUP_ZSBUFFER` arrives with `executed >= submitted` and
+   `on_demand != 0 && state != 0`, the firmware posts `FWCCB_ZSBUFFER_UNBACKING`
+   (`0x2ABC0066`, if `state != 3`), sets `state = 3 (UNBACKING_PENDING)`, and returns
+   `CLEANUP_BUSY` so the host retries cleanup after replying with
+   `KCCB_ZSBUFFER_UNBACKING_UPDATE` (which sets `state = 0`).
+2. **Failed backing (`KCCB_ZSBUFFER_BACKING_UPDATE` with `done == 0`):** sets `state = 0
+   (UNBACKED)` (logs `SPM_42`). When checking whether `FRAG_PR` is ready, the firmware only
+   blocks (`SPM_BUFFER_NOT_READY`) while **`state == 2 (BACKING_PENDING)`**. Once `state`
+   returns to `0`, `FRAG_PR` is **allowed to proceed without backing**: at the `FRAG_PR` kick,
+   if `prbuffer != NULL && state != 1 (BACKED)`, the firmware skips setting the forced Z/S
+   store/load bits (`0x80004`/`0x40004` / `0x8002`/`0x4002`) for that buffer (it does **not**
+   hang for the watchdog or re-request backing).
+3. **Which buffers a PR requests:** at OOM, the firmware requests backing unconditionally for
+   **both** non-NULL `cmd_geom.pr_buffer_fw_addr[0]` (ZS) and `[1]` (MSAA scratch) via
+   `FWCCB_ZSBUFFER_BACKING` (`0x2ABC0065`), without checking `cmd_frag` flags. At `FRAG_PR`
+   kick time, `cmd_frag.flags` bits `7` (`Z`) and `8` (`S`) decide whether Z/S store/load are
+   enabled (`MAIN_47`/`MAIN_46` when neither is set).
+4. **Unbacking pending when a PR needs the buffer again:** `request_prbuffer_backing` skips
+   only when `on_demand == 0 || state == 1` (unneeded) or `state == 2` (already pending). For
+   `state == 3 (UNBACKING_PENDING)` (as for `0`), it immediately posts
+   `FWCCB_ZSBUFFER_BACKING` and sets `state = 2 (BACKING_PENDING)`.
+5. **Cleanup (`CLEANUP_ZSBUFFER`):**
+   - if `executed < submitted` → return `CLEANUP_BUSY` (`CLEANUP_9`);
+   - else if `on_demand != 0 && state != 0` → request unbacking (step 1) and return
+     `CLEANUP_BUSY`;
+   - else (`on_demand == 0 || state == 0`) → flush D-cache over the `prbuffer` struct and
+     return `CMD_EXECUTED` (`CLEANUP_8`).
